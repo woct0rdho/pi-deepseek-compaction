@@ -25,13 +25,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Message, Model } from "@earendil-works/pi-ai";
-import { completeSimple, registerBuiltInApiProviders } from "@earendil-works/pi-ai/compat";
+import { createInitialSystemMessage, createModels, createProvider } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { buildInstructionMessage } from "../../src/instruction.ts";
 import { priceMessages, priceText } from "../../src/prefix.ts";
-import { runSummarizeCall } from "../../src/summarize.ts";
+import { runSummarizeCall, type CompleteFunction } from "../../src/summarize.ts";
 
 const MODEL_ID = process.env.PI_DEEPSEEK_COMPACTION_LIVE_MODEL?.trim() || "deepseek-flash";
 const BASE_URL = process.env.PI_DEEPSEEK_COMPACTION_LIVE_BASE_URL?.trim() || "https://api.deepseek.com";
+/** One routing id for the warm-up and summarize calls, mirroring a real session. */
+const SESSION_ID = "pi-deepseek-compaction-live";
 
 function readApiKey(): string | undefined {
   const fromEnv = process.env.DEEPSEEK_API_KEY?.trim();
@@ -133,8 +136,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  registerBuiltInApiProviders();
   const target = model();
+  const models = createModels();
+  models.setProvider(createProvider({
+    id: target.provider,
+    auth: { apiKey: { name: "DeepSeek", resolve: async () => ({ auth: {} }) } },
+    models: [target],
+    api: openAICompletionsApi(),
+  }));
+  const complete: CompleteFunction = (callModel, context, options) =>
+    models.completeSimple(callModel, context, { apiKey, ...options });
   const prefix = conversation();
   const prefixTokens = priceText(SYSTEM_PROMPT) + priceMessages(prefix);
 
@@ -143,28 +154,28 @@ async function main(): Promise<void> {
 
   // Warm the provider's cache with a request whose prompt starts with the same
   // system prompt and messages the summarize call will replay.
-  await completeSimple(
+  await models.completeSimple(
     target,
     {
       systemPrompt: SYSTEM_PROMPT,
       messages: [...prefix, { role: "user", content: [{ type: "text", text: "Reply with the single word ACK." }], timestamp: 0 }],
     },
-    { apiKey, maxTokens: 16, cacheRetention: "none" },
+    { apiKey, maxTokens: 16, cacheRetention: "none", sessionId: SESSION_ID },
   );
 
+  const systemMessage = createInitialSystemMessage(SYSTEM_PROMPT, []);
+  assert.ok(systemMessage !== undefined, "system message built");
   const attempt = async (): Promise<Awaited<ReturnType<typeof runSummarizeCall>>> =>
     runSummarizeCall(
       {
         model: target,
-        systemPrompt: SYSTEM_PROMPT,
-        messages: [...prefix, buildInstructionMessage()],
-        tools: [],
+        context: { messages: [systemMessage, ...prefix, buildInstructionMessage()] },
         maxTokens: 4096,
         reasoning: undefined,
         cacheRetention: "none",
-        apiKey,
+        sessionId: SESSION_ID,
       },
-      completeSimple,
+      complete,
     );
 
   // Cache construction takes seconds; retry once before measuring.

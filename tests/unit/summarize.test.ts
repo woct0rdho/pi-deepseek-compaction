@@ -111,16 +111,18 @@ describe("runSummarizeCall", () => {
     const outcome = await runSummarizeCall(
       {
         model,
-        systemPrompt: "SYSTEM",
-        messages: [
-          { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 0 },
-          { role: "user", content: [{ type: "text", text: "INSTRUCTION" }], timestamp: 1 },
-        ],
-        tools: [{ name: "read", description: "d", parameters: { type: "object" } }],
+        context: {
+          systemPrompt: "SYSTEM",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 0 },
+            { role: "user", content: [{ type: "text", text: "INSTRUCTION" }], timestamp: 1 },
+          ],
+          tools: [{ name: "read", description: "d", parameters: { type: "object" } }],
+        },
         maxTokens: 4096,
         reasoning: "high",
         cacheRetention: "none",
-        apiKey: "key",
+        sessionId: "session-1",
       },
       complete,
     );
@@ -140,7 +142,8 @@ describe("runSummarizeCall", () => {
     assert.equal(calls[0]?.options.cacheRetention, "none");
     assert.equal(calls[0]?.options.toolChoice, "none");
     assert.equal(calls[0]?.options.reasoning, "high");
-    assert.equal(calls[0]?.options.apiKey, "key");
+    assert.equal(calls[0]?.options.sessionId, "session-1");
+    assert.equal("apiKey" in (calls[0]?.options ?? {}), false);
   });
 
   it("omits reasoning when the call runs without thinking", async () => {
@@ -153,13 +156,11 @@ describe("runSummarizeCall", () => {
     await runSummarizeCall(
       {
         model,
-        systemPrompt: "SYSTEM",
-        messages: [],
-        tools: [],
+        context: { messages: [] },
         maxTokens: 100,
         reasoning: undefined,
         cacheRetention: "none",
-        apiKey: "key",
+        sessionId: "session-1",
       },
       complete,
     );
@@ -174,13 +175,11 @@ describe("runSummarizeCall", () => {
       runSummarizeCall(
         {
           model,
-          systemPrompt: "",
-          messages: [],
-          tools: [],
+          context: { messages: [] },
           maxTokens: 100,
           reasoning: undefined,
           cacheRetention: "none",
-          apiKey: "key",
+          sessionId: "session-1",
         },
         complete,
       ),

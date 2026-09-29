@@ -69,6 +69,17 @@ function compactionEntry(id: string, parentId: string, summary: string, firstKep
   } as SessionEntry;
 }
 
+function contextEditEntry(id: string, parentId: string, targetId: string): SessionEntry {
+  return {
+    type: "context_edit",
+    id,
+    parentId,
+    timestamp: TIMESTAMP,
+    targetId,
+    replacement: null,
+  } as SessionEntry;
+}
+
 describe("buildPrefixMessages", () => {
   it("returns the leading messages before Pi's cut", () => {
     const entries = [
@@ -113,6 +124,17 @@ describe("buildPrefixMessages", () => {
     ];
     const prefix = buildPrefixMessages(entries, "a1");
     assert.deepEqual(prefix.map(message => message.role), ["user"]);
+  });
+
+  it("applies append-only context edits before replaying", () => {
+    const entries = [
+      userEntry("u1", null, "omitted by an edit"),
+      assistantEntry("a1", "u1", "answer one"),
+      contextEditEntry("e1", "a1", "u1"),
+      userEntry("u2", "e1", "second"),
+    ];
+    const prefix = buildPrefixMessages(entries, "u2");
+    assert.deepEqual(prefix.map(message => message.role), ["assistant"]);
   });
 
   it("rejects a cut that is absent from the context", () => {

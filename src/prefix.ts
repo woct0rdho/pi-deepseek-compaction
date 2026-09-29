@@ -1,16 +1,17 @@
 /**
- * Prefix construction and pricing. The replayed prefix is Pi's own compaction-aware
- * context truncated at `firstKeptEntryId`, which makes it the leading part of the
- * message list a real turn sends.
+ * Prefix construction and pricing. The replayed prefix is Pi's canonical
+ * compaction-aware session projection truncated at `firstKeptEntryId`, which is
+ * the leading part of the transcript a real turn sends: the leading system
+ * message that declares the prompt and tool loadout, later prompt/tool updates,
+ * context edits applied, and the conversation up to the cut.
  * @module pi-deepseek-compaction/prefix
  */
 
 import { createHash } from "node:crypto";
 import {
-  buildContextEntries,
+  buildSessionProjection,
   convertToLlm,
   estimateTokens,
-  sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -28,18 +29,18 @@ export interface ToolSource {
 }
 
 /**
- * Rebuild the messages that precede the summary's replacement point.
+ * Rebuild the transcript that precedes the summary's replacement point.
  * @param branchEntries - Pi's branch entries for the session, as delivered by the hook.
  * @param firstKeptEntryId - Pi's cut point; the first entry that stays in context.
- * @returns agent messages in context order, ending just before the cut.
+ * @returns projected context messages in order, ending just before the cut.
  * @throws {PrefixBuildError} when the cut point is absent from the context.
  */
 export function buildPrefixMessages(
   branchEntries: readonly SessionEntry[],
   firstKeptEntryId: string,
 ): AgentMessage[] {
-  const contextEntries = buildContextEntries([...branchEntries]);
-  const cut = contextEntries.findIndex(entry => entry.id === firstKeptEntryId);
+  const projection = buildSessionProjection([...branchEntries]);
+  const cut = projection.entries.findIndex(entry => entry.sourceEntry.id === firstKeptEntryId);
   if (cut < 0) {
     throw new PrefixBuildError(
       `cut entry ${firstKeptEntryId} is absent from the compaction-aware context; cannot rebuild a prefix`,
@@ -48,7 +49,7 @@ export function buildPrefixMessages(
   if (cut === 0) {
     throw new PrefixBuildError("cut entry leaves no messages to summarize");
   }
-  return contextEntries.slice(0, cut).flatMap(entry => sessionEntryToContextMessages(entry));
+  return projection.entries.slice(0, cut).flatMap(entry => entry.messages);
 }
 
 /**
@@ -61,7 +62,9 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 }
 
 /**
- * Collect the tool schemas a real turn sends, in Pi's registration order.
+ * Collect the tool schemas a real turn declares, in Pi's registration order.
+ * Used only as a fallback for old sessions whose branch has no system message
+ * declaring the prompt and tools yet; current sessions replay that declaration.
  * @param source - extension API or any equivalent tool provider.
  * @returns tool definitions in the order the provider sees them.
  */

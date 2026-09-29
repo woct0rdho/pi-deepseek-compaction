@@ -8,6 +8,7 @@
  * @module pi-deepseek-compaction
  */
 
+import type { Context } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RequestCaptureStore } from "./capture.ts";
 import { loadConfig } from "./config.ts";
@@ -72,24 +73,6 @@ function safeNotify(ctx: ExtensionContext, text: string, level: "info" | "warnin
   process.stderr.write(`[deepseek-compaction] ${text}\n`);
 }
 
-function safeProjectTrusted(ctx: ExtensionContext): boolean {
-  try {
-    return ctx.isProjectTrusted() === true;
-  } catch {
-    return false;
-  }
-}
-
-/** Keep only string-valued headers; providers may carry null deletions. */
-function stringHeaders(headers: unknown): Record<string, string> | undefined {
-  if (typeof headers !== "object" || headers === null) return undefined;
-  const result: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
-    if (typeof value === "string") result[name] = value;
-  }
-  return Object.keys(result).length === 0 ? undefined : result;
-}
-
 /**
  * Register the extension: read-only request capture, the compaction hook, and
  * the status command.
@@ -105,7 +88,10 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
   const sessionModelKey = (ctx: ExtensionContext): string =>
     ctx.model === undefined ? "none" : modelKey(ctx.model);
 
-  pi.on("context", (event, ctx) => {
+  // `context_with_system` sees the full transcript, including the system messages
+  // that declare the prompt and tool loadout, which is what prefix rebuilding
+  // reproduces and what the provider receives.
+  pi.on("context_with_system", (event, ctx) => {
     captures.capture(sessionIdOf(ctx), sessionModelKey(ctx), event.messages);
   });
 
@@ -144,7 +130,6 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
     };
 
     try {
-      const settings = loadPiCompactionSettings(ctx.cwd, safeProjectTrusted(ctx));
       const sessionModel = ctx.model;
       const model = resolveSummarizationModel(
         config.compaction.model,
@@ -158,16 +143,23 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
       );
       const maxTokens = resolveMaxTokens(
         config.compaction.maxTokens,
-        settings.reserveTokens,
+        event.preparation.settings.reserveTokens,
         model.maxTokens,
       );
 
-      const systemPrompt = ctx.getSystemPrompt();
       const prefixMessages = buildPrefixMessages(event.branchEntries, event.preparation.firstKeptEntryId);
-      const tools = collectActiveTools(pi);
       const instruction = buildInstructionMessage(event.customInstructions);
-      const shadowedTokens = priceMessages(prefixMessages);
-      const prefixTokens = priceText(systemPrompt) + shadowedTokens;
+      const transcript = [...toLlmMessages(prefixMessages), instruction];
+      // Pi carries the prompt and tool loadout in the transcript's system messages.
+      // Replay them verbatim; only synthesize the request surface when an old
+      // session has no system message before the cut yet.
+      const hasTranscriptPrompt = prefixMessages.some(message => message.role === "system");
+      const systemPrompt = hasTranscriptPrompt ? undefined : ctx.getSystemPrompt();
+      const requestContext: Context = systemPrompt === undefined
+        ? { messages: transcript }
+        : { systemPrompt, tools: collectActiveTools(pi), messages: transcript };
+      const shadowedTokens = priceMessages(prefixMessages.filter(message => message.role !== "system"));
+      const prefixTokens = priceMessages(prefixMessages) + (systemPrompt === undefined ? 0 : priceText(systemPrompt));
       const captured = captures.get(id);
       const sharedPrefixMessages = sharedPrefixMessageCount(
         captured?.messageHashes,
@@ -186,29 +178,25 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         );
       }
 
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok) {
-        throw new ConfigProblem(`no credentials for ${modelKey(model)}: ${auth.error}`);
+      if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
+        throw new ConfigProblem(`no credentials for ${modelKey(model)}`);
       }
-      if (auth.apiKey === undefined || auth.apiKey.length === 0) {
-        throw new ConfigProblem(`no API key resolved for ${modelKey(model)}`);
-      }
+
+      const complete: CompleteFunction = options.complete
+        ?? ((callModel, context, callOptions) =>
+              ctx.modelRegistry.streamSimple(callModel, context, callOptions).result());
 
       const outcome = await runSummarizeCall(
         {
           model,
-          systemPrompt,
-          messages: [...toLlmMessages(prefixMessages), instruction],
-          tools,
+          context: requestContext,
           maxTokens,
           reasoning,
           cacheRetention: config.compaction.cacheRetention,
-          apiKey: auth.apiKey,
-          ...(stringHeaders(auth.headers) === undefined ? {} : { headers: stringHeaders(auth.headers) }),
-          ...(auth.env === undefined ? {} : { env: auth.env }),
+          sessionId: id,
           signal: event.signal,
         },
-        options.complete,
+        complete,
       );
       const { summaryTokens } = assertSummaryShrinks(outcome.summary, shadowedTokens);
 
@@ -288,7 +276,7 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
     handler: async (_args, ctx) => {
       const id = sessionIdOf(ctx);
       const resolution = loadConfig(ctx.cwd);
-      const settings = loadPiCompactionSettings(ctx.cwd, safeProjectTrusted(ctx));
+      const settings = loadPiCompactionSettings(pi.getSettings());
       const sessionModel = ctx.model;
       const problems: string[] = [...resolution.problems];
       let summarizeModelKey = "unresolved";

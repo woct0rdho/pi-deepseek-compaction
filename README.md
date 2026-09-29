@@ -1,7 +1,7 @@
 # pi-deepseek-compaction
 
 A Pi extension that replaces Pi's compaction summary generation with a prefix-preserving summarization call:
-- The summarize request replays the same system prompt, the same tool schemas, and the same leading messages a real turn already sent, then appends one instruction message. Providers with prefix caching (DeepSeek, OpenAI, most OpenAI-compatible servers) serve that prefix from cache, so compaction reads instead of re-billing the whole history.
+- The summarize request replays the exact leading transcript a real turn already sent - the system message that declares the prompt and tool loadout, later prompt/tool updates, context edits applied, and the conversation up to Pi's cut - then appends one instruction message. Providers with prefix caching (DeepSeek, OpenAI, most OpenAI-compatible servers) serve that prefix from cache, so compaction reads instead of re-billing the whole history.
 - The instruction asks for a DSH-style structured checkpoint: Primary Request and Intent, Key Technical Concepts, Files and Code, Errors and Fixes, Pending Jobs, Current Work, Next Step, Critical Context.
 - Pi keeps everything else: its trigger policy, `CompactionEntry`, `firstKeptEntryId`, `details`, `usage`, `/compact [instructions]`, and session/tree semantics. Pi's `<read-files>` / `<modified-files>` blocks are preserved and accumulate across compactions.
 
@@ -14,7 +14,7 @@ pi install -l ~/pi-deepseek-compaction
 pi -e ~/pi-deepseek-compaction/src/index.ts --model deepseek/deepseek-flash
 ```
 
-No provider or API is hardcoded. The extension works wherever Pi can make a normal request: it uses the current session model, `ctx.getSystemPrompt()`, and the active tool set.
+No provider or API is hardcoded. The extension works wherever Pi can make a normal request: it uses the current session model and Pi's model registry (`ctx.modelRegistry.streamSimple()`), so configured providers, OAuth, proxies, and custom base URLs keep working.
 
 ## Configuration
 
@@ -51,7 +51,7 @@ There is no `enabled` flag: loading the extension is the switch. Configuration i
 ## Behavior
 
 - Triggers: Pi's threshold compaction, overflow recovery, and `/compact` all route through the extension's `session_before_compact` handler.
-- The prefix: Pi's compaction-aware context is truncated at `firstKeptEntryId` and converted with Pi's own functions, so the request is a byte prefix of what the provider already served. Split turns need no special case: the early part of the turn is simply replayed in place.
+- The prefix: Pi's canonical session projection (`buildSessionProjection`) is truncated at `firstKeptEntryId`, so appended context edits and prompt/tool updates are honored and the request is a byte prefix of what the provider already served. Split turns need no special case: the early part of the turn is simply replayed in place. The summarize call forwards the session id, so providers with session-affinity caching (OpenRouter and similar) route it to the same cache as real turns.
 - Validation: the summary must be non-empty text, must not call tools, must not be truncated, and must be strictly smaller than the history it replaces.
 - Failures cancel: nothing is written and Pi's built-in summarizer is never invoked, so a failure leaves the conversation exactly as it was. The reason appears as a warning, or on stderr in print and JSON modes.
 - Never silent: `/deepseek-compaction` reports the effective configuration, the resolved models, the last compaction's `cacheRead / prefixTokens` ratio, the rolling ratio over all compactions this extension recorded in the session, prefix fidelity (`sharedPrefixMessages / prefixMessages`), and the last failure.

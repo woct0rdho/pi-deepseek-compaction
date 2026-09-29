@@ -6,6 +6,8 @@ The directory and package keep the `deepseek-compaction` name for historical rea
 
 The plan follows Pi's design and data structures: Pi still owns the compaction trigger policy, the `CompactionEntry`, `firstKeptEntryId`, the `session_before_compact` hook, `details`, `usage`, `/compact [instructions]`, and session/tree semantics. The extension only replaces how the summary text is produced, and it contributes to Pi's existing compaction flow rather than adding a parallel one.
 
+> Implementation note (Pi 0.99): the plan below records the original 0.85-era design. The provider call now goes through `ctx.modelRegistry.streamSimple()` with the session id instead of `@earendil-works/pi-ai/compat`'s `completeSimple`, the prefix is rebuilt from `buildSessionProjection()` so context edits and transcript system messages are honored, and prefix fingerprints are captured on `context_with_system`. See `README.md` for the current behavior.
+
 ## Decisions already made
 
 - Default summary output cap is Pi's formula: `floor(0.8 * reserveTokens)`, clamped by `model.maxTokens`, where `reserveTokens` comes from Pi's compaction settings (default 16384).

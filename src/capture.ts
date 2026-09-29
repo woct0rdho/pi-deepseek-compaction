@@ -1,8 +1,9 @@
 /**
  * Capture of the last real request's message fingerprints, used to report how
  * much of the rebuilt prefix a provider has actually seen. Capture happens on
- * the `context` hook, where Pi hands over the same agent-message representation
- * that prefix rebuilding produces, so both sides are comparable.
+ * the `context_with_system` hook, where Pi hands over the full transcript -
+ * including the system messages that declare the prompt and tool loadout - so
+ * both sides are comparable with prefix rebuilding.
  * @module pi-deepseek-compaction/capture
  */
 

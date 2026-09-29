@@ -1,9 +1,8 @@
 /**
  * Wire-level test for the property the extension exists for: the summarize
- * request's system message, tools, and leading messages are byte-identical to a
- * real request the provider already served. It drives pi-ai's real
- * `openai-completions` adapter against a local mock endpoint, so no provider is
- * contacted and nothing is billed.
+ * request's leading messages are byte-identical to a real request the provider
+ * already served. It drives pi-ai's real `openai-completions` provider against a
+ * local mock endpoint, so no provider is contacted and nothing is billed.
  * @module pi-deepseek-compaction/tests/wire/prefix
  */
 
@@ -11,10 +10,11 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
-import type { Context, Message, Model, Tool } from "@earendil-works/pi-ai";
-import { completeSimple, registerBuiltInApiProviders } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions, Tool } from "@earendil-works/pi-ai";
+import { createInitialSystemMessage, createModels, createProvider } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { buildInstructionMessage } from "../../src/instruction.ts";
-import { runSummarizeCall } from "../../src/summarize.ts";
+import { runSummarizeCall, type CompleteFunction } from "../../src/summarize.ts";
 
 interface CapturedBody {
   [key: string]: unknown;
@@ -52,7 +52,6 @@ function sseResponse(): string {
 }
 
 before(async () => {
-  registerBuiltInApiProviders();
   server = createServer((request, response) => {
     let body = "";
     request.on("data", (chunk: Buffer) => {
@@ -87,6 +86,18 @@ function modelFor(compat: Record<string, unknown> | undefined): Model<any> {
     maxTokens: 4096,
     ...(compat === undefined ? {} : { compat }),
   } as unknown as Model<any>;
+}
+
+/** One fresh provider collection with the mock endpoint registered. */
+function modelsFor(model: Model<any>) {
+  const models = createModels();
+  models.setProvider(createProvider({
+    id: model.provider,
+    auth: { apiKey: { name: "local test endpoint", resolve: async () => ({ auth: {} }) } },
+    models: [model],
+    api: openAICompletionsApi(),
+  }));
+  return models;
 }
 
 const TOOLS: Tool[] = [
@@ -129,29 +140,38 @@ const SYSTEM_PROMPT = "You are a coding agent. Follow the repository conventions
 
 async function runPairCase(label: string, compat: Record<string, unknown> | undefined): Promise<void> {
   const model = modelFor(compat);
+  const models = modelsFor(model);
   const messages = conversation(model);
-  const context: Context = { systemPrompt: SYSTEM_PROMPT, messages, tools: TOOLS };
 
+  // A real turn: the prompt and tool loadout live in the leading system message.
+  const context: Context = { systemPrompt: SYSTEM_PROMPT, messages, tools: TOOLS };
   const before = captured.length;
-  await completeSimple(model, context, { apiKey: "test-key" });
+  await models.completeSimple(model, context, { apiKey: "test-key" });
   const realBody = captured[before];
   assert.ok(realBody !== undefined, `${label}: real request captured`);
 
-  // The summarize call replays the first two turns and appends the instruction.
+  // The summarize call replays the same leading system message, the first two
+  // turns, and appends the instruction.
+  const systemMessage = createInitialSystemMessage(SYSTEM_PROMPT, TOOLS);
+  assert.ok(systemMessage !== undefined, `${label}: system message built`);
   const prefix = messages.slice(0, 3);
+  const complete: CompleteFunction = (
+    callModel: Model<any>,
+    callContext: Context,
+    options: SimpleStreamOptions,
+  ): Promise<AssistantMessage> => models.completeSimple(callModel, callContext, { apiKey: "test-key", ...options });
+
   const beforeSummarize = captured.length;
   await runSummarizeCall(
     {
       model,
-      systemPrompt: SYSTEM_PROMPT,
-      messages: [...prefix, buildInstructionMessage()],
-      tools: TOOLS,
+      context: { messages: [systemMessage, ...prefix, buildInstructionMessage()] },
       maxTokens: 8192,
       reasoning: undefined,
       cacheRetention: "none",
-      apiKey: "test-key",
+      sessionId: "wire-test-session",
     },
-    completeSimple,
+    complete,
   );
   const summarizeBody = captured[beforeSummarize];
   assert.ok(summarizeBody !== undefined, `${label}: summarize request captured`);

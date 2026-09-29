@@ -5,8 +5,14 @@
  * @module pi-deepseek-compaction/summarize
  */
 
-import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { AssistantMessage, Message, Model, ThinkingLevel, Tool, Usage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Context,
+  Model,
+  SimpleStreamOptions,
+  ThinkingLevel,
+  Usage,
+} from "@earendil-works/pi-ai";
 import { framedSummaryText } from "./instruction.ts";
 import { priceText } from "./prefix.ts";
 import type { CacheRetention } from "./types.ts";
@@ -19,20 +25,25 @@ export class SummarizeError extends Error {
 /** Everything one summarize request needs. */
 export interface SummarizeCall {
   model: Model<any>;
-  systemPrompt: string;
-  /** Replayed prefix followed by the instruction message. */
-  messages: Message[];
-  tools: Tool[];
+  /** Replayed transcript prefix followed by the instruction message. */
+  context: Context;
   maxTokens: number;
   reasoning: ThinkingLevel | undefined;
   cacheRetention: CacheRetention;
-  apiKey: string;
-  headers?: Record<string, string>;
+  /** Session id forwarded for provider cache and session-affinity routing. */
+  sessionId: string;
   signal?: AbortSignal;
 }
 
-/** Completion function, injectable so tests never reach a provider. */
-export type CompleteFunction = typeof completeSimple;
+/**
+ * Completion function used for the summarize call. The extension routes it
+ * through `ctx.modelRegistry.streamSimple()`; tests inject a fake.
+ */
+export type CompleteFunction = (
+  model: Model<any>,
+  context: Context,
+  options: SimpleStreamOptions,
+) => Promise<AssistantMessage>;
 
 /** Accepted summary text and the usage of the call that produced it. */
 export interface SummarizeOutcome {
@@ -97,29 +108,24 @@ export function assertSummaryShrinks(
 }
 
 /**
- * Run the summarize request through the same provider adapter a normal turn uses.
- * @param call - model, replayed prefix, instruction, and call options.
- * @param complete - completion function; defaults to pi-ai's `completeSimple`.
+ * Run the summarize request through the same provider path a normal turn uses.
+ * @param call - model, replayed transcript, instruction, and call options.
+ * @param complete - completion function supplied by the caller.
  * @returns accepted summary text and provider usage.
  * @throws {SummarizeError} when the response cannot become a checkpoint.
  */
 export async function runSummarizeCall(
   call: SummarizeCall,
-  complete: CompleteFunction = completeSimple,
+  complete: CompleteFunction,
 ): Promise<SummarizeOutcome> {
   const response = await complete(
     call.model,
+    call.context,
     {
-      systemPrompt: call.systemPrompt,
-      messages: call.messages,
-      tools: call.tools,
-    },
-    {
-      apiKey: call.apiKey,
-      ...(call.headers === undefined ? {} : { headers: call.headers }),
       maxTokens: call.maxTokens,
       cacheRetention: call.cacheRetention,
       toolChoice: "none",
+      sessionId: call.sessionId,
       ...(call.reasoning === undefined ? {} : { reasoning: call.reasoning }),
       ...(call.signal === undefined ? {} : { signal: call.signal }),
     },
