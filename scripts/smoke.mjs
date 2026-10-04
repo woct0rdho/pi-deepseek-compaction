@@ -1,8 +1,6 @@
-/**
- * Offline smoke test. Imports the extension's pure modules and checks the
- * documented defaults and formats. No provider is contacted and nothing is
- * billed; run with `npm run smoke`.
- */
+// Offline smoke test. Imports the extension's pure modules and checks the
+// documented defaults and formats. No provider is contacted and nothing is
+// billed. Run with `npm run smoke`.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -24,7 +22,7 @@ try {
     PI_CODING_AGENT_DIR: join(root, "agent"),
   });
   assert.deepEqual(problems, [], "a missing config produces no problems");
-  assert.equal(config.compaction.cacheRetention, "none");
+  assert.equal(config.compaction.cacheRetention, "inherit");
   assert.equal(config.compaction.model, "");
   assert.equal(config.notify, "off");
   assert.equal(config.fileLists, true);

@@ -1,8 +1,3 @@
-/**
- * Unit tests for configuration loading and fallbacks.
- * @module pi-deepseek-compaction/tests/unit/config
- */
-
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,7 +32,7 @@ describe("loadConfig", () => {
     const { agentDir, cwd } = scaffold();
     const resolution = loadConfig(cwd, { PI_CODING_AGENT_DIR: agentDir });
     assert.deepEqual(resolution.config, {
-      compaction: { model: "", thinkingLevel: "", maxTokens: 0, cacheRetention: "none" },
+      compaction: { model: "", thinkingLevel: "", maxTokens: 0, cacheRetention: "inherit" },
       fileLists: true,
       notify: "off",
       dryRun: false,
@@ -85,7 +80,7 @@ describe("loadConfig", () => {
     });
     const resolution = loadConfig(cwd, { PI_CODING_AGENT_DIR: agentDir });
     assert.equal(resolution.config.compaction.maxTokens, 0);
-    assert.equal(resolution.config.compaction.cacheRetention, "none");
+    assert.equal(resolution.config.compaction.cacheRetention, "inherit");
     assert.equal(resolution.config.notify, "off");
     assert.equal(resolution.config.dryRun, false);
     assert.equal(resolution.problems.length, 4);

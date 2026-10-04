@@ -1,8 +1,3 @@
-/**
- * Unit tests for the rolling cache statistics and the status report.
- * @module pi-deepseek-compaction/tests/unit/status
- */
-
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -27,8 +22,8 @@ function details(overrides: Partial<PrefixCompactionDetails> = {}): PrefixCompac
   return {
     version: 1,
     instructionVersion: 1,
-    modelKey: "deepseek/deepseek-v4-pro",
-    summarizationModelKey: "deepseek/deepseek-v4-pro",
+    modelKey: "deepseek/deepseek-flash",
+    summarizationModelKey: "deepseek/deepseek-flash",
     maxTokens: 8192,
     thinkingLevel: null,
     cacheRetention: "none",
@@ -91,8 +86,8 @@ describe("buildStatusReport", () => {
     const report = buildStatusReport({
       resolution,
       piSettings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
-      sessionModelKey: "deepseek/deepseek-v4-pro",
-      summarizeModelKey: "deepseek/deepseek-v4-pro",
+      sessionModelKey: "deepseek/deepseek-flash",
+      summarizeModelKey: "deepseek/deepseek-flash",
       sameModel: true,
       stats: collectRollingStats([
         compactionEntry("c1", { dshCompaction: details({ cacheRead: 4_500, prefixTokens: 5_000 }) }),
@@ -100,7 +95,7 @@ describe("buildStatusReport", () => {
       lastFailure: undefined,
       problems: [],
     });
-    assert.match(report, /session model: deepseek\/deepseek-v4-pro/i);
+    assert.match(report, /session model: deepseek\/deepseek-flash/i);
     assert.match(report, /same model: prefix reuse expected/);
     assert.match(report, /reserve 16384, keepRecent 20000/);
     assert.match(report, /Compactions by this extension: 1/);
@@ -114,7 +109,7 @@ describe("buildStatusReport", () => {
     const report = buildStatusReport({
       resolution: { ...resolution, problems: ["config: invalid value"] },
       piSettings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
-      sessionModelKey: "deepseek/deepseek-v4-pro",
+      sessionModelKey: "deepseek/deepseek-flash",
       summarizeModelKey: "deepseek/deepseek-flash",
       sameModel: false,
       stats: collectRollingStats([]),

@@ -1,10 +1,7 @@
-/**
- * Status command content: the effective configuration, the resolved models, and
- * the cache-read ratio of the last and of all compactions recorded by this
- * extension in the session. Numbers come from ordinary `CompactionEntry`
- * details, so they survive resume, fork, and tree navigation.
- * @module pi-deepseek-compaction/status
- */
+// Status command content: the effective configuration, the resolved models, and
+// the cache-read ratio of the last and of all compactions recorded by this
+// extension in the session. Numbers come from ordinary `CompactionEntry`
+// details, so they survive resume, fork, and tree navigation.
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type {
@@ -14,18 +11,17 @@ import type {
   PrefixCompactionDetails,
 } from "./types.ts";
 
-/** One compaction recorded by this extension. */
 export interface PrefixCompactionRecord {
   entryId: string;
   timestamp: string;
   details: PrefixCompactionDetails;
 }
 
-/** Session-wide cache statistics over this extension's compactions. */
+// Session-wide cache statistics over this extension's compactions.
 export interface RollingStats {
-  /** Compactions recorded by this extension. */
+  // Compactions recorded by this extension.
   count: number;
-  /** Compactions in the session that this extension did not produce. */
+  // Compactions in the session that this extension did not produce.
   otherCompactions: number;
   prefixTokens: number;
   sharedPrefixTokens: number;
@@ -51,11 +47,6 @@ function readPrefixDetails(entry: SessionEntry): PrefixCompactionDetails | undef
   return isPrefixDetails(nested) ? nested : undefined;
 }
 
-/**
- * Sum this extension's recorded compactions and count the rest.
- * @param entries - every session entry, as Pi reports them.
- * @returns the rolling statistics shown by the status command.
- */
 export function collectRollingStats(entries: readonly SessionEntry[]): RollingStats {
   const stats: RollingStats = {
     count: 0,
@@ -82,18 +73,11 @@ export function collectRollingStats(entries: readonly SessionEntry[]): RollingSt
   return stats;
 }
 
-/**
- * Render a ratio, or `n/a` when the denominator is zero.
- * @param numerator - measured part, such as cache-read tokens.
- * @param denominator - total part, such as estimated prefix tokens.
- * @returns the ratio with two decimals.
- */
 export function formatRatio(numerator: number, denominator: number): string {
   if (denominator <= 0) return "n/a";
   return (numerator / denominator).toFixed(2);
 }
 
-/** Inputs for the status report text. */
 export interface StatusReportParams {
   resolution: ConfigResolution;
   piSettings: PiCompactionSettings;
@@ -105,11 +89,6 @@ export interface StatusReportParams {
   problems: readonly string[];
 }
 
-/**
- * Build the status command's report.
- * @param params - configuration, models, rolling statistics, and known problems.
- * @returns the notification text.
- */
 export function buildStatusReport(params: StatusReportParams): string {
   const { config } = params.resolution;
   const { stats } = params;

@@ -1,9 +1,3 @@
-/**
- * Unit tests for response validation, the shrink check, and the summarize call
- * envelope. The provider call is injected, so nothing here touches a network.
- * @module pi-deepseek-compaction/tests/unit/summarize
- */
-
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
@@ -30,7 +24,7 @@ function assistant(overrides: Partial<AssistantMessage>): AssistantMessage {
     content: [{ type: "text", text: "SUMMARY" }],
     api: "openai-completions",
     provider: "deepseek",
-    model: "deepseek-v4-pro",
+    model: "deepseek-flash",
     usage: USAGE,
     stopReason: "stop",
     timestamp: 0,
@@ -90,7 +84,7 @@ describe("assertSummaryShrinks", () => {
 
 describe("runSummarizeCall", () => {
   const model = {
-    id: "deepseek-v4-pro",
+    id: "deepseek-flash",
     provider: "deepseek",
     api: "openai-completions",
     baseUrl: "https://api.deepseek.com",

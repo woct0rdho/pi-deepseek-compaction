@@ -1,24 +1,22 @@
-/**
- * Opt-in live cache test. It sends a small prefix to a real DeepSeek-compatible
- * endpoint twice - once as a normal request, once as the summarize request - and
- * checks that the second call reads the first call's prefix from the provider's
- * cache.
- *
- * Cost control: the fixture is roughly one thousand tokens, output is capped,
- * and the test refuses to run without `PI_DEEPSEEK_COMPACTION_LIVE=1`. It is
- * never part of `npm test` and never wired into CI.
- *
- * Provider behavior is best-effort by design: a provider may not have finished
- * building the cache entry for the newest request when the summarize call
- * arrives, so the test retries once and reports the measured ratio instead of
- * demanding a fixed one.
- *
- * Environment:
- *   PI_DEEPSEEK_COMPACTION_LIVE=1        required opt-in
- *   DEEPSEEK_API_KEY                     credential; falls back to auth.json
- *   PI_DEEPSEEK_COMPACTION_LIVE_MODEL    model id (default deepseek-flash)
- *   PI_DEEPSEEK_COMPACTION_LIVE_BASE_URL base URL (default https://api.deepseek.com)
- */
+// Opt-in live cache test. It sends a small prefix to a real DeepSeek-compatible
+// endpoint twice - once as a normal request, once as the summarize request - and
+// checks that the second call reads the first call's prefix from the provider's
+// cache.
+//
+// Cost control: the fixture is roughly one thousand tokens, output is capped,
+// and the test refuses to run without `PI_DEEPSEEK_COMPACTION_LIVE=1`. It is
+// never part of `npm test` and never wired into CI.
+//
+// Provider behavior is best-effort by design: a provider may not have finished
+// building the cache entry for the newest request when the summarize call
+// arrives, so the test retries once and reports the measured ratio instead of
+// demanding a fixed one.
+//
+// Environment:
+//   PI_DEEPSEEK_COMPACTION_LIVE=1        required opt-in
+//   DEEPSEEK_API_KEY                     credential, falls back to auth.json
+//   PI_DEEPSEEK_COMPACTION_LIVE_MODEL    model id (default deepseek-flash)
+//   PI_DEEPSEEK_COMPACTION_LIVE_BASE_URL base URL (default https://api.deepseek.com)
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -33,7 +31,7 @@ import { runSummarizeCall, type CompleteFunction } from "../../src/summarize.ts"
 
 const MODEL_ID = process.env.PI_DEEPSEEK_COMPACTION_LIVE_MODEL?.trim() || "deepseek-flash";
 const BASE_URL = process.env.PI_DEEPSEEK_COMPACTION_LIVE_BASE_URL?.trim() || "https://api.deepseek.com";
-/** One routing id for the warm-up and summarize calls, mirroring a real session. */
+// One routing id for the warm-up and summarize calls, mirroring a real session.
 const SESSION_ID = "pi-deepseek-compaction-live";
 
 function readApiKey(): string | undefined {
@@ -78,7 +76,7 @@ const SYSTEM_PROMPT =
   "You are a coding agent. Follow the repository conventions and reply briefly. "
   + "Prefer small, reviewable changes and keep durable notes about decisions.";
 
-/** A few hundred tokens of ordinary engineering conversation. */
+// A few hundred tokens of ordinary engineering conversation.
 const PREFIX_TEXT: Array<{ role: "user" | "assistant"; text: string }> = [
   {
     role: "user",

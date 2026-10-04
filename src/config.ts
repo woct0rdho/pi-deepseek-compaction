@@ -1,17 +1,14 @@
-/**
- * Configuration loading. The global file `~/.pi/agent/deepseek-compaction.json`
- * and the project file `<cwd>/.pi/deepseek-compaction.json` are read
- * tolerantly, environment variables override both, and no failure ever throws:
- * a malformed file behaves like a missing one, an invalid value falls back to
- * its default, and the rejection is recorded for the status command.
- * @module pi-deepseek-compaction/config
- */
+// Configuration loading. The global file `~/.pi/agent/deepseek-compaction.json`
+// and the project file `<cwd>/.pi/deepseek-compaction.json` are read
+// tolerantly, environment variables override both, and no failure ever throws:
+// a malformed file behaves like a missing one, an invalid value falls back to
+// its default, and the rejection is recorded for the status command.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
-  CacheRetention,
+  ConfiguredCacheRetention,
   CompactionConfig,
   ConfigResolution,
   NotifyPolicy,
@@ -19,13 +16,10 @@ import type {
   SummarizeThinkingLevel,
 } from "./types.ts";
 
-/** File name used in the agent directory and in a project `.pi` directory. */
 export const CONFIG_FILE_NAME = "deepseek-compaction.json";
 
-/** Environment prefix for every override. */
 export const ENV_PREFIX = "PI_DEEPSEEK_COMPACTION_";
 
-/** Thinking levels accepted from configuration, including an explicit off. */
 export const THINKING_LEVELS: readonly SummarizeThinkingLevel[] = [
   "off",
   "minimal",
@@ -36,17 +30,15 @@ export const THINKING_LEVELS: readonly SummarizeThinkingLevel[] = [
   "max",
 ];
 
-/** Cache retention values accepted from configuration. */
-export const CACHE_RETENTION_VALUES: readonly CacheRetention[] = ["none", "short", "long"];
+export const CACHE_RETENTION_VALUES: readonly ConfiguredCacheRetention[] = ["inherit", "none", "short", "long"];
 
-/** Notification policies accepted from configuration. */
 export const NOTIFY_POLICIES: readonly NotifyPolicy[] = ["off", "summary", "diagnostic"];
 
 const DEFAULT_COMPACTION: CompactionConfig = {
   model: "",
   thinkingLevel: "",
   maxTokens: 0,
-  cacheRetention: "none",
+  cacheRetention: "inherit",
 };
 
 const DEFAULT_CONFIG: ResolvedConfig = {
@@ -62,7 +54,6 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Read one JSON object, treating a missing, malformed, or non-object file as absent. */
 function readJsonRecord(path: string): { found: boolean; value: JsonRecord } {
   if (!existsSync(path)) return { found: false, value: {} };
   try {
@@ -101,13 +92,11 @@ function toMember<T extends string>(value: unknown, allowed: readonly T[]): T | 
   return (allowed as readonly string[]).includes(text) ? (text as T) : undefined;
 }
 
-/** Accept an optional string, where an empty value means "use the session default". */
 function toOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   return value.trim();
 }
 
-/** Accept a choice that may be explicitly cleared with an empty string. */
 function toOptionalMember<T extends string>(value: unknown, allowed: readonly T[]): T | "" | undefined {
   const text = toOptionalString(value);
   if (text === undefined) return undefined;
@@ -120,10 +109,6 @@ interface Layer {
   value: unknown;
 }
 
-/**
- * Return the first defined layer's coerced value, recording one problem when
- * that value is present but invalid.
- */
 function resolveField<T>(
   layers: readonly Layer[],
   coerce: (value: unknown) => T | undefined,
@@ -140,12 +125,6 @@ function resolveField<T>(
   return fallback;
 }
 
-/**
- * Resolve the extension configuration for one working directory.
- * @param cwd - working directory whose `.pi` directory may hold a project config.
- * @param env - environment source, injectable for tests.
- * @returns the resolved configuration, the files it read, and rejected values.
- */
 export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): ConfigResolution {
   const agentDir = env.PI_CODING_AGENT_DIR?.trim() || getAgentDir();
   const globalPath = join(agentDir, CONFIG_FILE_NAME);

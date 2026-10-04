@@ -1,8 +1,3 @@
-/**
- * Unit tests for model, thinking-level, and output-cap resolution.
- * @module pi-deepseek-compaction/tests/unit/resolve
- */
-
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
@@ -16,7 +11,7 @@ import {
 
 function model(overrides: Partial<Model<any>> = {}): Model<any> {
   return {
-    id: "deepseek-v4-pro",
+    id: "deepseek-flash",
     name: "DeepSeek V4 Pro",
     api: "openai-completions",
     provider: "deepseek",
@@ -107,6 +102,6 @@ describe("resolveMaxTokens", () => {
 
 describe("modelKey", () => {
   it("renders provider and model id", () => {
-    assert.equal(modelKey(model()), "deepseek/deepseek-v4-pro");
+    assert.equal(modelKey(model()), "deepseek/deepseek-flash");
   });
 });

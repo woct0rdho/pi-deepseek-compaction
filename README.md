@@ -7,14 +7,9 @@ A Pi extension that replaces Pi's compaction summary generation with a prefix-pr
 
 ## Install
 
-```bash
-# project-local:
-pi install -l ~/pi-deepseek-compaction
-# or one-shot:
-pi -e ~/pi-deepseek-compaction/src/index.ts --model deepseek/deepseek-flash
-```
+Requires Pi 1.0 or newer. The extension uses the host's session projection, settings, `context_with_system` hook, and provider stack, and has no fallback path for older versions.
 
-No provider or API is hardcoded. The extension works wherever Pi can make a normal request: it uses the current session model and Pi's model registry (`ctx.modelRegistry.streamSimple()`), so configured providers, OAuth, proxies, and custom base URLs keep working.
+No provider or API is hardcoded. The extension works wherever Pi can make a normal request. It uses the current session model and Pi's model registry (`ctx.modelRegistry.streamSimple()`), so configured providers, OAuth, proxies, and custom base URLs keep working.
 
 ## Configuration
 
@@ -26,7 +21,7 @@ No provider or API is hardcoded. The extension works wherever Pi can make a norm
     "model": "",
     "thinkingLevel": "",
     "maxTokens": 0,
-    "cacheRetention": "none"
+    "cacheRetention": "inherit"
   },
   "fileLists": true,
   "notify": "off",
@@ -39,33 +34,34 @@ No provider or API is hardcoded. The extension works wherever Pi can make a norm
 | `compaction.model` | `""` | Model id used for the summarize call. Empty means the current session model, which is the only value that can reuse the prefix cache. |
 | `compaction.thinkingLevel` | `""` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Empty uses the session level. |
 | `compaction.maxTokens` | `0` | Output cap. `0` means Pi's formula, `floor(0.8 * reserveTokens)`, clamped by the model. |
-| `compaction.cacheRetention` | `"none"` | Forwarded to pi-ai. `"none"` requests no cache write; automatic prefix caches are read regardless. Use `"short"`/`"long"` for providers that need explicit cache markers. |
+| `compaction.cacheRetention` | `"inherit"` | `"inherit"` forwards nothing, so pi-ai applies exactly the retention a normal turn uses and cache markers, if any, land in the same place. On automatic-cache providers such as DeepSeek it makes no wire difference. Set `"none"`, `"short"`, or `"long"` to override. |
 | `fileLists` | `true` | Append and accumulate Pi's `<read-files>` / `<modified-files>` blocks. |
 | `notify` | `"off"` | `"off"`, `"summary"` (one line after each success), or `"diagnostic"` (also prefix fidelity and token counts). Failures always notify once as a warning. |
 | `dryRun` | `false` | Build and report the request without calling the model. |
 
-There is no `enabled` flag: loading the extension is the switch. Configuration is read tolerantly - a malformed file behaves like a missing one, an invalid value falls back to its default, and `/deepseek-compaction` lists what was rejected.
+There is no `enabled` flag. Loading the extension is the switch. Configuration is read tolerantly. A malformed file behaves like a missing one, an invalid value falls back to its default, and `/deepseek-compaction` lists what was rejected.
 
-`reserveTokens` and `keepRecentTokens` stay Pi's settings (`~/.pi/agent/settings.json` and the project `.pi/settings.json`); the extension reads them only to derive the default output cap.
+`reserveTokens` and `keepRecentTokens` stay Pi's settings. The extension never re-derives them, and each compaction uses the values Pi hands to `session_before_compact` through `preparation.settings`.
 
 ## Behavior
 
 - Triggers: Pi's threshold compaction, overflow recovery, and `/compact` all route through the extension's `session_before_compact` handler.
-- The prefix: Pi's canonical session projection (`buildSessionProjection`) is truncated at `firstKeptEntryId`, so appended context edits and prompt/tool updates are honored and the request is a byte prefix of what the provider already served. Split turns need no special case: the early part of the turn is simply replayed in place. The summarize call forwards the session id, so providers with session-affinity caching (OpenRouter and similar) route it to the same cache as real turns.
+- The prefix: Pi's canonical session projection (`buildSessionProjection`) is truncated at `firstKeptEntryId`, so appended context edits, prompt section patches, and tool loadout changes are honored and the request is a byte prefix of what the provider already served. Split turns need no special case. The early part of the turn is simply replayed in place. No `systemPrompt` and no tool schemas are rebuilt - the provider adapter derives both from the replayed transcript, exactly as it does for a real turn - and the summarize call forwards the session id, so session-affinity caching routes it to the same cache as real turns.
 - Validation: the summary must be non-empty text, must not call tools, must not be truncated, and must be strictly smaller than the history it replaces.
 - Failures cancel: nothing is written and Pi's built-in summarizer is never invoked, so a failure leaves the conversation exactly as it was. The reason appears as a warning, or on stderr in print and JSON modes.
 - Never silent: `/deepseek-compaction` reports the effective configuration, the resolved models, the last compaction's `cacheRead / prefixTokens` ratio, the rolling ratio over all compactions this extension recorded in the session, prefix fidelity (`sharedPrefixMessages / prefixMessages`), and the last failure.
 
-Cache reads are best-effort and provider-defined. A provider may not have finished building the cache entry for content added seconds earlier, so the ratio is a measurement rather than a guarantee; prefix fidelity tells the two failure modes apart (provider did not cache vs. prefix no longer matched).
+Cache reads are best-effort and provider-defined. A provider may not have finished building the cache entry for content added seconds earlier, so the ratio is a measurement rather than a guarantee. Prefix fidelity tells the two failure modes apart (provider did not cache vs. prefix no longer matched).
 
 ## Testing
 
 ```bash
-npm test          # typecheck, unit tests, wire test, smoke - offline, no provider calls
-npm run test:live # opt-in; requires PI_DEEPSEEK_COMPACTION_LIVE=1 and a DeepSeek key
+npm test          # typecheck, unit tests, wire test, smoke. Offline, no provider calls
+npm run test:e2e  # offline. Real Pi 1.0.x against a local mock provider (needs `pi` on PATH)
+npm run test:live # opt-in. Requires PI_DEEPSEEK_COMPACTION_LIVE=1 and a DeepSeek key
 ```
 
-The default run is entirely offline. The wire test drives pi-ai's real `openai-completions` adapter against a local mock endpoint and asserts that the summarize request's leading messages, system prompt, and tools are byte-identical to a real request, with no cache-write fields. The live test sends roughly a thousand tokens to a real endpoint, is never part of `npm test`, and is never wired into CI.
+The default run is entirely offline. The wire test drives pi-ai's real `openai-completions` provider against a local mock endpoint and asserts that the summarize request's leading messages and tool loadout are byte-identical to a real request, including a transcript with a prompt section patch, a mid-session tool loadout change, and context edits that omit a failed attempt. The end-to-end check spawns Pi itself against the same kind of mock, forces a compaction, and diffs the captured request bodies, which also proves the host wiring (`context_with_system`, `pi.getSettings()`, `buildSessionProjection`, `streamSimple`). The live test sends roughly a thousand tokens to a real endpoint, is never part of `npm test`, and is never wired into CI.
 
 ## Repository layout
 
@@ -73,12 +69,12 @@ The default run is entirely offline. The wire test drives pi-ai's real `openai-c
 | --- | --- |
 | `src/index.ts` | Hook wiring, request capture, the compaction handler, the status command |
 | `src/config.ts` | Tolerant config file and environment resolution |
-| `src/settings.ts` | Reads Pi's `reserveTokens` / `keepRecentTokens` |
-| `src/prefix.ts` | Prefix rebuilding, tool collection, pricing, fingerprints |
+| `src/settings.ts` | Pi's own settings via `pi.getSettings()`, used by the status command |
+| `src/prefix.ts` | Session-projection slicing, pricing, fingerprints |
 | `src/instruction.ts` | The compaction instruction and Pi's framing text |
 | `src/resolve.ts` | Model, thinking level, and output-cap resolution |
 | `src/summarize.ts` | The provider call and response validation |
 | `src/fileops.ts` | Cumulative file lists and Pi's block formatting |
 | `src/capture.ts` | Per-session request fingerprints |
 | `src/status.ts` | Rolling statistics and status report text |
-| `PLAN.md` | Design plan, decisions, and what has been validated |
+| `scripts/pi-prefix-check.mjs` | `npm run test:e2e`: offline end-to-end prefix check through real Pi |

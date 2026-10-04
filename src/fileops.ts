@@ -1,22 +1,17 @@
-/**
- * File-operation tracking kept from Pi's default compactor: the read and
- * modified lists are extracted from tool calls, accumulated across compactions,
- * and appended to the summary as `<read-files>` / `<modified-files>` blocks.
- * @module pi-deepseek-compaction/fileops
- */
+// File-operation tracking kept from Pi's default compactor: the read and
+// modified lists are extracted from tool calls, accumulated across compactions,
+// and appended to the summary as `<read-files>` / `<modified-files>` blocks.
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { FileListDetails } from "./types.ts";
 
-/** Mutable file-operation accumulators. */
 export interface FileOps {
   read: Set<string>;
   written: Set<string>;
   edited: Set<string>;
 }
 
-/** Create empty accumulators. */
 export function createFileOps(): FileOps {
   return { read: new Set(), written: new Set(), edited: new Set() };
 }
@@ -27,7 +22,6 @@ interface ToolCallBlock {
   arguments?: unknown;
 }
 
-/** Read `arguments.path` from a tool-call-shaped content block. */
 function toolCallPath(block: unknown): { name: string; path: string } | undefined {
   if (typeof block !== "object" || block === null) return undefined;
   const candidate = block as ToolCallBlock;
@@ -38,11 +32,6 @@ function toolCallPath(block: unknown): { name: string; path: string } | undefine
   return typeof path === "string" && path.length > 0 ? { name: candidate.name, path } : undefined;
 }
 
-/**
- * Accumulate file operations from assistant tool calls.
- * @param messages - messages being summarized.
- * @param ops - accumulators to extend.
- */
 export function extractFileOpsFromMessages(messages: readonly AgentMessage[], ops: FileOps): void {
   for (const message of messages) {
     if (message.role !== "assistant") continue;
@@ -61,15 +50,11 @@ function stringsOf(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-/**
- * Accumulate file lists recorded by earlier compactions. This extension's own
- * details are read first because Pi skips extension-provided details when it
- * accumulates its own lists; Pi's plain `{ readFiles, modifiedFiles }` shape is
- * still honored for sessions compacted before this extension was mounted, and a
- * nested copy under `dshCompaction` is accepted as well.
- * @param branchEntries - Pi's branch entries for the session.
- * @param ops - accumulators to extend.
- */
+// Accumulate file lists recorded by earlier compactions. This extension's own
+// details are read first because Pi skips extension-provided details when it
+// accumulates its own lists. Pi's plain `{ readFiles, modifiedFiles }` shape is
+// still honored for sessions compacted before this extension was mounted, and a
+// nested copy under `dshCompaction` is accepted as well.
 export function collectPreviousFileOps(branchEntries: readonly SessionEntry[], ops: FileOps): void {
   for (const entry of branchEntries) {
     if (entry.type !== "compaction") continue;
@@ -86,22 +71,12 @@ export function collectPreviousFileOps(branchEntries: readonly SessionEntry[], o
   }
 }
 
-/**
- * Reduce accumulators to Pi's two reported lists.
- * @param ops - accumulated file operations.
- * @returns read-only files (sorted) and modified files (sorted).
- */
 export function computeFileLists(ops: FileOps): FileListDetails {
   const modified = new Set([...ops.edited, ...ops.written]);
   const readOnly = [...ops.read].filter(path => !modified.has(path)).sort();
   return { readFiles: readOnly, modifiedFiles: [...modified].sort() };
 }
 
-/**
- * Format the file lists the way Pi appends them to a summary.
- * @param lists - computed file lists.
- * @returns the appended block, or an empty string when both lists are empty.
- */
 export function formatFileOperations(lists: FileListDetails): string {
   const sections: string[] = [];
   if (lists.readFiles.length > 0) {

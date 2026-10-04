@@ -1,14 +1,13 @@
-/**
- * Entry point for the prefix-preserving compaction extension. Pi keeps its own
- * trigger policy, `CompactionEntry`, `firstKeptEntryId`, and `/compact`; this
- * extension only replaces how the summary text is produced, by replaying a
- * byte-identical prefix of a real request and appending one instruction
- * message at the end. Every failure cancels the compaction, so Pi's built-in
- * compactor is never invoked.
- * @module pi-deepseek-compaction
- */
+// Entry point for the prefix-preserving compaction extension. Pi keeps its own
+// trigger policy, `CompactionEntry`, `firstKeptEntryId`, and `/compact`; this
+// extension only replaces how the summary text is produced: it replays Pi's own
+// session projection up to the compaction cut and appends one instruction
+// message. Because the projection is what a normal request sends, the provider
+// adapter derives the same system prompt, tool declarations, and leading
+// messages, so the request keeps a byte-identical prefix and the provider's
+// prompt cache serves it. Every failure cancels the compaction, so Pi's
+// built-in compactor is never invoked.
 
-import type { Context } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RequestCaptureStore } from "./capture.ts";
 import { loadConfig } from "./config.ts";
@@ -21,12 +20,10 @@ import {
 } from "./fileops.ts";
 import { INSTRUCTION_VERSION, buildInstructionMessage } from "./instruction.ts";
 import {
-  buildPrefixMessages,
-  collectActiveTools,
   fingerprintMessages,
   priceMessages,
-  priceText,
   sharedPrefixMessageCount,
+  sliceProjection,
   toLlmMessages,
 } from "./prefix.ts";
 import {
@@ -38,17 +35,11 @@ import {
 } from "./resolve.ts";
 import { loadPiCompactionSettings } from "./settings.ts";
 import { buildStatusReport, collectRollingStats, formatRatio } from "./status.ts";
-import {
-  assertSummaryShrinks,
-  runSummarizeCall,
-  type CompleteFunction,
-} from "./summarize.ts";
+import { assertSummaryShrinks, runSummarizeCall, type CompleteFunction } from "./summarize.ts";
 import type { ExtensionCompactionDetails, FailureRecord } from "./types.ts";
 
-/** Status command name registered for the interactive and RPC modes. */
 export const STATUS_COMMAND = "deepseek-compaction";
 
-/** Injectable dependencies; tests override the provider call. */
 export interface PrefixCompactionOptions {
   complete?: CompleteFunction;
 }
@@ -63,7 +54,7 @@ function safeNotify(ctx: ExtensionContext, text: string, level: "info" | "warnin
       ctx.ui.notify(text, level);
       return;
     } catch (error: unknown) {
-      // The UI is optional and can be torn down mid-session; fall through to
+      // The UI is optional and can be torn down mid-session. Fall through to
       // stderr rather than failing a compaction for a diagnostic.
       void error;
     }
@@ -73,12 +64,6 @@ function safeNotify(ctx: ExtensionContext, text: string, level: "info" | "warnin
   process.stderr.write(`[deepseek-compaction] ${text}\n`);
 }
 
-/**
- * Register the extension: read-only request capture, the compaction hook, and
- * the status command.
- * @param pi - Pi's extension API.
- * @param options - injectable provider call used by tests.
- */
 export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCompactionOptions = {}): void {
   const captures = new RequestCaptureStore();
   const failures = new Map<string, FailureRecord>();
@@ -88,9 +73,6 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
   const sessionModelKey = (ctx: ExtensionContext): string =>
     ctx.model === undefined ? "none" : modelKey(ctx.model);
 
-  // `context_with_system` sees the full transcript, including the system messages
-  // that declare the prompt and tool loadout, which is what prefix rebuilding
-  // reproduces and what the provider receives.
   pi.on("context_with_system", (event, ctx) => {
     captures.capture(sessionIdOf(ctx), sessionModelKey(ctx), event.messages);
   });
@@ -147,30 +129,24 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         model.maxTokens,
       );
 
-      const prefixMessages = buildPrefixMessages(event.branchEntries, event.preparation.firstKeptEntryId);
-      const instruction = buildInstructionMessage(event.customInstructions);
-      const transcript = [...toLlmMessages(prefixMessages), instruction];
-      // Pi carries the prompt and tool loadout in the transcript's system messages.
-      // Replay them verbatim; only synthesize the request surface when an old
-      // session has no system message before the cut yet.
-      const hasTranscriptPrompt = prefixMessages.some(message => message.role === "system");
-      const systemPrompt = hasTranscriptPrompt ? undefined : ctx.getSystemPrompt();
-      const requestContext: Context = systemPrompt === undefined
-        ? { messages: transcript }
-        : { systemPrompt, tools: collectActiveTools(pi), messages: transcript };
-      const shadowedTokens = priceMessages(prefixMessages.filter(message => message.role !== "system"));
-      const prefixTokens = priceMessages(prefixMessages) + (systemPrompt === undefined ? 0 : priceText(systemPrompt));
+      const slice = sliceProjection(
+        ctx.sessionManager.buildSessionProjection(),
+        event.preparation.firstKeptEntryId,
+      );
+      const prefixTokens = priceMessages(slice.messages);
+      const shadowedTokens = priceMessages(slice.summarized);
       const captured = captures.get(id);
       const sharedPrefixMessages = sharedPrefixMessageCount(
         captured?.messageHashes,
-        fingerprintMessages(prefixMessages),
+        fingerprintMessages(slice.messages),
       );
-      const sharedPrefixTokens = priceMessages(prefixMessages.slice(0, sharedPrefixMessages));
+      const sharedPrefixTokens = priceMessages(slice.messages.slice(0, sharedPrefixMessages));
 
       if (config.dryRun) {
         return cancel(
-          `dry run: would summarize ${prefixMessages.length} messages`
-            + ` (~${shadowedTokens} tokens, ${sharedPrefixMessages} shared with ${captured?.modelKey ?? "no"} capture)`
+          `dry run: would summarize ${slice.summarized.length} conversation messages`
+            + ` (~${shadowedTokens} tokens; ${slice.messages.length} projected messages, ~${prefixTokens} tokens;`
+            + ` ${sharedPrefixMessages} shared with ${captured?.modelKey ?? "no"} capture)`
             + ` as ${modelKey(model)} with maxTokens ${maxTokens}`
             + ` and cacheRetention ${config.compaction.cacheRetention}`,
           true,
@@ -178,32 +154,31 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         );
       }
 
-      if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
-        throw new ConfigProblem(`no credentials for ${modelKey(model)}`);
-      }
-
-      const complete: CompleteFunction = options.complete
-        ?? ((callModel, context, callOptions) =>
-              ctx.modelRegistry.streamSimple(callModel, context, callOptions).result());
+      // Pi's own provider stack: request-time auth, transport, and adapter.
+      const hostComplete: CompleteFunction = (callModel, callContext, callOptions) =>
+        ctx.modelRegistry.streamSimple(callModel, callContext, callOptions).result();
 
       const outcome = await runSummarizeCall(
         {
           model,
-          context: requestContext,
+          context: {
+            messages: [...toLlmMessages(slice.messages), buildInstructionMessage(event.customInstructions)],
+          },
           maxTokens,
           reasoning,
-          cacheRetention: config.compaction.cacheRetention,
+          cacheRetention:
+            config.compaction.cacheRetention === "inherit" ? undefined : config.compaction.cacheRetention,
           sessionId: id,
           signal: event.signal,
         },
-        complete,
+        options.complete ?? hostComplete,
       );
       const { summaryTokens } = assertSummaryShrinks(outcome.summary, shadowedTokens);
 
       const ops = createFileOps();
       if (config.fileLists) {
         collectPreviousFileOps(event.branchEntries, ops);
-        extractFileOpsFromMessages(prefixMessages, ops);
+        extractFileOpsFromMessages(slice.summarized, ops);
       }
       const lists = computeFileLists(ops);
       const summary = config.fileLists
@@ -225,7 +200,7 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
           maxTokens,
           thinkingLevel: reasoning ?? null,
           cacheRetention: config.compaction.cacheRetention,
-          prefixMessages: prefixMessages.length,
+          prefixMessages: slice.messages.length,
           prefixTokens,
           ...(promptTokens === undefined ? {} : { promptTokens }),
           sharedPrefixMessages,
@@ -241,10 +216,10 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
       };
 
       if (config.notify !== "off") {
-        const base = `deepseek-compaction: compacted ${prefixMessages.length} messages`
+        const base = `deepseek-compaction: compacted ${slice.summarized.length} messages`
           + `; cacheRead ${usage?.cacheRead ?? 0}/${prefixTokens} = ${formatRatio(usage?.cacheRead ?? 0, prefixTokens)}`;
         const text = config.notify === "diagnostic"
-          ? `${base}; prefix fidelity ${sharedPrefixMessages}/${prefixMessages.length}`
+          ? `${base}; prefix fidelity ${sharedPrefixMessages}/${slice.messages.length}`
             + `; prompt tokens ${promptTokens ?? "n/a"}; model ${modelKey(model)}`
           : base;
         safeNotify(ctx, text, "info");

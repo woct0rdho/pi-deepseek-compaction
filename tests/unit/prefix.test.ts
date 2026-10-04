@@ -1,21 +1,16 @@
-/**
- * Unit tests for prefix rebuilding, tool collection, pricing, and fingerprints.
- * @module pi-deepseek-compaction/tests/unit/prefix
- */
-
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { RequestCaptureStore } from "../../src/capture.ts";
 import {
   PrefixBuildError,
-  buildPrefixMessages,
-  collectActiveTools,
   fingerprintMessages,
   priceMessages,
   priceText,
   sharedPrefixMessageCount,
+  sliceProjection,
   toLlmMessages,
 } from "../../src/prefix.ts";
 
@@ -42,7 +37,7 @@ function assistantEntry(id: string, parentId: string | null, text: string): Sess
       content: [{ type: "text", text }],
       api: "openai-completions",
       provider: "deepseek",
-      model: "deepseek-v4-pro",
+      model: "deepseek-flash",
       usage: {
         input: 10,
         output: 5,
@@ -54,7 +49,27 @@ function assistantEntry(id: string, parentId: string | null, text: string): Sess
       stopReason: "stop",
       timestamp: 0,
     },
-  } as SessionEntry;
+  };
+}
+
+function systemEntry(
+  id: string,
+  parentId: string | null,
+  content: string,
+  sections?: Record<string, string>,
+): SessionEntry {
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp: TIMESTAMP,
+    message: {
+      role: "system",
+      content,
+      ...(sections === undefined ? {} : { sections }),
+      timestamp: 0,
+    },
+  };
 }
 
 function compactionEntry(id: string, parentId: string, summary: string, firstKeptEntryId: string): SessionEntry {
@@ -66,7 +81,7 @@ function compactionEntry(id: string, parentId: string, summary: string, firstKep
     summary,
     firstKeptEntryId,
     tokensBefore: 1000,
-  } as SessionEntry;
+  };
 }
 
 function contextEditEntry(id: string, parentId: string, targetId: string): SessionEntry {
@@ -77,10 +92,14 @@ function contextEditEntry(id: string, parentId: string, targetId: string): Sessi
     timestamp: TIMESTAMP,
     targetId,
     replacement: null,
-  } as SessionEntry;
+  };
 }
 
-describe("buildPrefixMessages", () => {
+function projectAndSlice(entries: SessionEntry[], firstKeptEntryId: string) {
+  return sliceProjection(buildSessionProjection(entries), firstKeptEntryId);
+}
+
+describe("sliceProjection", () => {
   it("returns the leading messages before Pi's cut", () => {
     const entries = [
       userEntry("u1", null, "first"),
@@ -88,9 +107,10 @@ describe("buildPrefixMessages", () => {
       userEntry("u2", "a1", "second"),
       assistantEntry("a2", "u2", "answer two"),
     ];
-    const prefix = buildPrefixMessages(entries, "u2");
-    assert.deepEqual(prefix.map(message => message.role), ["user", "assistant"]);
-    assert.deepEqual(toLlmMessages(prefix).map(message => message.role), ["user", "assistant"]);
+    const slice = projectAndSlice(entries, "u2");
+    assert.deepEqual(slice.messages.map(message => message.role), ["user", "assistant"]);
+    assert.deepEqual(slice.summarized.map(message => message.role), ["user", "assistant"]);
+    assert.deepEqual(toLlmMessages(slice.messages).map(message => message.role), ["user", "assistant"]);
   });
 
   it("replays the previous summary message when the cut sits after it", () => {
@@ -102,18 +122,11 @@ describe("buildPrefixMessages", () => {
       assistantEntry("a2", "c1", "answer two"),
       userEntry("u3", "a2", "third"),
     ];
-    const prefix = buildPrefixMessages(entries, "u3");
-    assert.deepEqual(prefix.map(message => message.role), ["compactionSummary", "user", "assistant"]);
-    const llm = toLlmMessages(prefix);
+    const slice = projectAndSlice(entries, "u3");
+    assert.deepEqual(slice.messages.map(message => message.role), ["compactionSummary", "user", "assistant"]);
+    const llm = toLlmMessages(slice.messages);
     assert.equal(llm.length, 3);
-    const first = llm[0];
-    assert.equal(first?.role, "user");
-    assert.match(
-      first?.role === "user" && typeof first.content === "string"
-        ? first.content
-        : JSON.stringify(first?.content),
-      /PRIOR SUMMARY/,
-    );
+    assert.match(JSON.stringify(llm[0]), /PRIOR SUMMARY/);
   });
 
   it("keeps the kept tail out of the prefix", () => {
@@ -122,46 +135,51 @@ describe("buildPrefixMessages", () => {
       assistantEntry("a1", "u1", "answer one"),
       userEntry("u2", "a1", "second"),
     ];
-    const prefix = buildPrefixMessages(entries, "a1");
-    assert.deepEqual(prefix.map(message => message.role), ["user"]);
+    const slice = projectAndSlice(entries, "a1");
+    assert.deepEqual(slice.messages.map(message => message.role), ["user"]);
+    assert.deepEqual(slice.summarized.map(message => message.role), ["user"]);
   });
 
-  it("applies append-only context edits before replaying", () => {
+  it("keeps system prompt state in the prefix but out of the summarized span", () => {
+    const entries = [
+      systemEntry("s1", null, "You are a coding agent.", { rules: "<rules>be terse</rules>" }),
+      userEntry("u1", "s1", "first"),
+      assistantEntry("a1", "u1", "answer one"),
+      systemEntry("s2", "a1", "", { rules: "<rules>be brief</rules>" }),
+      userEntry("u2", "s2", "second"),
+    ];
+    const slice = projectAndSlice(entries, "u2");
+    assert.deepEqual(slice.messages.map(message => message.role), ["system", "user", "assistant", "system"]);
+    assert.deepEqual(slice.summarized.map(message => message.role), ["user", "assistant"]);
+  });
+
+  it("applies append-only context edits before slicing", () => {
     const entries = [
       userEntry("u1", null, "omitted by an edit"),
       assistantEntry("a1", "u1", "answer one"),
       contextEditEntry("e1", "a1", "u1"),
       userEntry("u2", "e1", "second"),
     ];
-    const prefix = buildPrefixMessages(entries, "u2");
-    assert.deepEqual(prefix.map(message => message.role), ["assistant"]);
+    const slice = projectAndSlice(entries, "u2");
+    assert.deepEqual(slice.messages.map(message => message.role), ["assistant"]);
   });
 
-  it("rejects a cut that is absent from the context", () => {
+  it("rejects a cut that is absent from the projection", () => {
     const entries = [userEntry("u1", null, "first"), assistantEntry("a1", "u1", "answer one")];
-    assert.throws(() => buildPrefixMessages(entries, "missing"), PrefixBuildError);
+    assert.throws(() => projectAndSlice(entries, "missing"), PrefixBuildError);
   });
 
   it("rejects a cut that leaves nothing to summarize", () => {
     const entries = [userEntry("u1", null, "first")];
-    assert.throws(() => buildPrefixMessages(entries, "u1"), PrefixBuildError);
+    assert.throws(() => projectAndSlice(entries, "u1"), PrefixBuildError);
   });
-});
 
-describe("collectActiveTools", () => {
-  const source = {
-    getAllTools: () => [
-      { name: "read", description: "read a file", parameters: { type: "object" } },
-      { name: "bash", description: "run a command", parameters: { type: "object" } },
-      { name: "edit", description: "edit a file", parameters: { type: "object" } },
-    ],
-    getActiveTools: () => ["bash", "read"],
-  } as never;
-
-  it("keeps registration order and drops inactive tools", () => {
-    const tools = collectActiveTools(source);
-    assert.deepEqual(tools.map(tool => tool.name), ["read", "bash"]);
-    assert.equal(tools[0]?.description, "read a file");
+  it("rejects a prefix that holds only system prompt state", () => {
+    const entries = [
+      systemEntry("s1", null, "You are a coding agent."),
+      userEntry("u1", "s1", "first"),
+    ];
+    assert.throws(() => projectAndSlice(entries, "u1"), /no conversation messages/);
   });
 });
 

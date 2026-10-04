@@ -1,8 +1,3 @@
-/**
- * Unit tests for file-operation tracking.
- * @module pi-deepseek-compaction/tests/unit/fileops
- */
-
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
