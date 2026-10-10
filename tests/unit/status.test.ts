@@ -89,6 +89,7 @@ describe("buildStatusReport", () => {
       sessionModelKey: "deepseek/deepseek-flash",
       summarizeModelKey: "deepseek/deepseek-flash",
       sameModel: true,
+      capture: { ageMs: 2_500, modelKey: "deepseek/deepseek-flash", messageCount: 812, replayFieldCount: 6 },
       stats: collectRollingStats([
         compactionEntry("c1", { dshCompaction: details({ cacheRead: 4_500, prefixTokens: 5_000 }) }),
       ]),
@@ -97,6 +98,7 @@ describe("buildStatusReport", () => {
     });
     assert.match(report, /session model: deepseek\/deepseek-flash/i);
     assert.match(report, /same model: prefix reuse expected/);
+    assert.match(report, /Replay source: last real request 2\.5 s ago \(deepseek\/deepseek-flash, 812 messages, 6 non-message fields to replay\)/);
     assert.match(report, /reserve 16384, keepRecent 20000/);
     assert.match(report, /Compactions by this extension: 1/);
     assert.match(report, /Last: {4}cacheRead 4500 \/ prefixTokens 5000 = 0.90/);
@@ -112,11 +114,13 @@ describe("buildStatusReport", () => {
       sessionModelKey: "deepseek/deepseek-flash",
       summarizeModelKey: "deepseek/deepseek-flash",
       sameModel: false,
+      capture: undefined,
       stats: collectRollingStats([]),
       lastFailure: { at: Date.UTC(2026, 0, 2), reason: "compaction cancelled: prefix build failed" },
       problems: ["no credentials"],
     });
     assert.match(report, /different model: prefix reuse not expected/);
+    assert.match(report, /Replay source: no real request captured yet/);
     assert.match(report, /Last: {4}none recorded/);
     assert.match(report, /Last failure: 2026-01-02T00:00:00.000Z compaction cancelled/);
     assert.match(report, /Configuration problems:/);

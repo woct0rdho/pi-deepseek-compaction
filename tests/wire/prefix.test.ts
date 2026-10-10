@@ -14,6 +14,7 @@ import { buildSessionProjection, convertToLlm } from "@earendil-works/pi-coding-
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { buildInstructionMessage } from "../../src/instruction.ts";
 import { sliceProjection } from "../../src/prefix.ts";
+import { OUTPUT_CAP_FIELDS, payloadShell, replayableFields } from "../../src/replay.ts";
 import { runSummarizeCall, type CompleteFunction } from "../../src/summarize.ts";
 
 interface CapturedBody {
@@ -28,7 +29,7 @@ const captured: CapturedBody[] = [];
 let server: Server;
 let baseUrl: string;
 
-// One SSE chat-completions response carrying text and DeepSeek-style cache usage. 
+// One SSE chat-completions response carrying text and DeepSeek-style cache usage.
 function sseResponse(): string {
   const chunk = (delta: unknown, finish: string | null, usage?: unknown): string =>
     `data: ${JSON.stringify({
@@ -88,7 +89,7 @@ function modelFor(compat: Record<string, unknown> | undefined): Model<any> {
   } as unknown as Model<any>;
 }
 
-// One fresh provider collection with the mock endpoint registered. 
+// One fresh provider collection with the mock endpoint registered.
 function modelsFor(model: Model<any>) {
   const models = createModels();
   models.setProvider(createProvider({
@@ -105,7 +106,7 @@ const TOOLS: Tool[] = [
   { name: "bash", description: "Run a command", parameters: { type: "object", properties: { command: { type: "string" } } } },
 ];
 
-// A realistic conversation: two completed turns and a trailing user message. 
+// A realistic conversation: two completed turns and a trailing user message.
 function conversation(model: Model<any>): Message[] {
   const assistant = (text: string, thinking?: string): Message => ({
     role: "assistant",
@@ -138,7 +139,21 @@ function conversation(model: Model<any>): Message[] {
 
 const SYSTEM_PROMPT = "You are a coding agent. Follow the repository conventions.";
 
-async function runPairCase(label: string, compat: Record<string, unknown> | undefined): Promise<void> {
+// The request shape: every field that keys the provider's prompt cache but is
+// not the message list. The output cap is sized by the summarize call itself and
+// does not participate in the cache key.
+function shape(body: CapturedBody): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(body).filter(([key]) =>
+      key !== "messages" && !(OUTPUT_CAP_FIELDS as readonly string[]).includes(key)),
+  );
+}
+
+async function runPairCase(
+  label: string,
+  compat: Record<string, unknown> | undefined,
+  realOptions: SimpleStreamOptions = {},
+): Promise<void> {
   const model = modelFor(compat);
   const models = modelsFor(model);
   const messages = conversation(model);
@@ -146,9 +161,12 @@ async function runPairCase(label: string, compat: Record<string, unknown> | unde
   // A real turn: the prompt and tool loadout live in the leading system message.
   const context: Context = { systemPrompt: SYSTEM_PROMPT, messages, tools: TOOLS };
   const before = captured.length;
-  await models.completeSimple(model, context, { apiKey: "test-key" });
+  await models.completeSimple(model, context, { apiKey: "test-key", ...realOptions });
   const realBody = captured[before];
   assert.ok(realBody !== undefined, `${label}: real request captured`);
+  const shell = payloadShell(realBody);
+  assert.ok(shell !== undefined, `${label}: real request payload is an object`);
+  const replay = replayableFields(shell);
 
   // The summarize call replays the same leading system message, the first two
   // turns, and appends the instruction.
@@ -170,11 +188,17 @@ async function runPairCase(label: string, compat: Record<string, unknown> | unde
       reasoning: undefined,
       cacheRetention: "none",
       sessionId: "wire-test-session",
+      replay,
     },
     complete,
   );
   const summarizeBody = captured[beforeSummarize];
   assert.ok(summarizeBody !== undefined, `${label}: summarize request captured`);
+
+  // The shape the provider keys its cache on must be the real request's, not one
+  // rebuilt from settings. `tool_choice: "none"` here used to be enough to make
+  // every summarize call a full-price miss on DeepSeek.
+  assert.deepEqual(shape(summarizeBody), shape(realBody), `${label}: request shape matches the real request`);
 
   const prefixLength = 1 + prefix.length;
   assert.equal(realBody.messages.length, 1 + messages.length, `${label}: real request message count`);
@@ -215,6 +239,95 @@ describe("prefix preservation on the wire", () => {
     });
   });
 
+  it("replays a neutral tool choice a real turn sent", async () => {
+    const model = modelFor(undefined);
+    const models = modelsFor(model);
+    const complete: CompleteFunction = (
+      callModel: Model<any>,
+      callContext: Context,
+      options: SimpleStreamOptions,
+    ): Promise<AssistantMessage> => models.completeSimple(callModel, callContext, { apiKey: "test-key", ...options });
+    const messages = conversation(model);
+    const beforeReal = captured.length;
+    await models.completeSimple(
+      model,
+      { systemPrompt: SYSTEM_PROMPT, messages, tools: TOOLS },
+      { apiKey: "test-key", toolChoice: "auto" },
+    );
+    const realBody = captured[beforeReal];
+    assert.ok(realBody !== undefined);
+    assert.equal(realBody.tool_choice, "auto", "real turn used a neutral tool choice");
+
+    const beforeSummarize = captured.length;
+    await runSummarizeCall(
+      {
+        model,
+        context: {
+          messages: [createInitialSystemMessage(SYSTEM_PROMPT, TOOLS)!, messages[0]!, buildInstructionMessage()],
+        },
+        maxTokens: 2048,
+        reasoning: undefined,
+        cacheRetention: "none",
+        sessionId: "wire-test-session",
+        replay: replayableFields(payloadShell(realBody)!),
+      },
+      complete,
+    );
+    const summarizeBody = captured[beforeSummarize];
+    assert.ok(summarizeBody !== undefined);
+    assert.equal(summarizeBody.tool_choice, "auto", "neutral tool choice is replayed verbatim");
+  });
+
+  it("drops a forced tool choice but replays the rest of the shape", async () => {
+    const model = modelFor(undefined);
+    const models = modelsFor(model);
+    const complete: CompleteFunction = (
+      callModel: Model<any>,
+      callContext: Context,
+      options: SimpleStreamOptions,
+    ): Promise<AssistantMessage> => models.completeSimple(callModel, callContext, { apiKey: "test-key", ...options });
+    const messages = conversation(model);
+    const beforeReal = captured.length;
+    // pi-ai's own options cannot express a forced choice (its type is "auto" |
+    // "none"), but another API or an extension rewriting the payload can, so the
+    // captured payload is made to carry one here.
+    const forcedChoice = { type: "function", function: { name: "read" } };
+    await models.completeSimple(
+      model,
+      { systemPrompt: SYSTEM_PROMPT, messages, tools: TOOLS },
+      {
+        apiKey: "test-key",
+        onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), tool_choice: forcedChoice }),
+      },
+    );
+    const realBody = captured[beforeReal];
+    assert.ok(realBody !== undefined);
+    assert.deepEqual(realBody.tool_choice, forcedChoice, "real turn forced a tool call");
+    const replay = replayableFields(payloadShell(realBody)!);
+    assert.deepEqual(replay.adjusted, ["tool_choice"], "forced tool choice is not replayable");
+
+    const beforeSummarize = captured.length;
+    await runSummarizeCall(
+      {
+        model,
+        context: {
+          messages: [createInitialSystemMessage(SYSTEM_PROMPT, TOOLS)!, messages[0]!, buildInstructionMessage()],
+        },
+        maxTokens: 2048,
+        reasoning: undefined,
+        cacheRetention: "none",
+        sessionId: "wire-test-session",
+        replay,
+      },
+      complete,
+    );
+    const summarizeBody = captured[beforeSummarize];
+    assert.ok(summarizeBody !== undefined);
+    assert.equal("tool_choice" in summarizeBody, false, "a forced tool call is never replayed");
+    assert.equal(summarizeBody.model, realBody.model, "the rest of the shape is still replayed");
+    assert.deepEqual(summarizeBody.tools, realBody.tools, "tool schemas are still replayed");
+  });
+
   it("holds across context edits, prompt section patches, and tool loadout changes", async () => {
     const model = modelFor({
       supportsStore: false,
@@ -244,6 +357,7 @@ describe("prefix preservation on the wire", () => {
         reasoning: undefined,
         cacheRetention: undefined,
         sessionId: "wire-test-session",
+        replay: replayableFields(payloadShell(realBody)!),
       },
       complete,
     );
@@ -255,7 +369,7 @@ describe("prefix preservation on the wire", () => {
     // The cut sits at the trailing user message, so the replayed prefix is the
     // real request minus that message, and the instruction takes its place. The
     // adapter may collapse system-message patches, so the wire counts differ from
-    // the projection counts; the bytes of everything before the cut must not.
+    // the projection counts. The bytes of everything before the cut must not.
     assert.equal(summarizeBody.messages.length, realBody.messages.length);
     assert.deepEqual(
       summarizeBody.messages.slice(0, -1),
@@ -264,6 +378,7 @@ describe("prefix preservation on the wire", () => {
     );
     assert.match(JSON.stringify(summarizeBody.messages.at(-1)), /compaction engine/);
     assert.deepEqual(summarizeBody.tools, realBody.tools, "mid-session: tool loadout matches");
+    assert.deepEqual(shape(summarizeBody), shape(realBody), "mid-session: request shape matches");
 
     // The omitted failed attempt and its tool result appear in neither request.
     const summarizeJson = JSON.stringify(summarizeBody);

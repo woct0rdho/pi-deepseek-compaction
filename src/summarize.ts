@@ -12,6 +12,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { framedSummaryText } from "./instruction.ts";
 import { priceText } from "./prefix.ts";
+import { mergeReplayPayload, type ReplayFields } from "./replay.ts";
 import type { CacheRetention } from "./types.ts";
 
 export class SummarizeError extends Error {
@@ -38,6 +39,9 @@ export interface SummarizeCall {
   cacheRetention: CacheRetention | undefined;
   // Session routing id, forwarded exactly as normal turns do.
   sessionId: string;
+  // Non-message fields of the last real request's payload, reapplied on top of
+  // the payload the adapter builds so the provider sees the same request shape.
+  replay?: ReplayFields;
   signal?: AbortSignal;
 }
 
@@ -91,6 +95,10 @@ export function assertSummaryShrinks(
 // Run the summarize request through the host's provider stack and adapter.
 // Only messages are supplied, so the adapter derives the system prompt and tool
 // declarations from the replayed transcript exactly as it does for a real turn.
+// `onPayload` then reapplies the captured request shape, so thinking mode, tool
+// choice, tool schemas, and provider extras are the ones the provider cached.
+// No tool choice is set here: the shape comes from the capture, and the
+// instruction plus response validation keep the model from calling a tool.
 export async function runSummarizeCall(
   call: SummarizeCall,
   complete: CompleteFunction,
@@ -98,10 +106,10 @@ export async function runSummarizeCall(
   const options: SimpleStreamOptions = {
     maxTokens: call.maxTokens,
     sessionId: call.sessionId,
-    toolChoice: "none",
     ...(call.cacheRetention === undefined ? {} : { cacheRetention: call.cacheRetention }),
     ...(call.reasoning === undefined ? {} : { reasoning: call.reasoning }),
     ...(call.signal === undefined ? {} : { signal: call.signal }),
+    onPayload: (payload: unknown) => mergeReplayPayload(payload, call.replay, call.maxTokens),
   };
   const response = await complete(call.model, call.context, options);
   const summary = validateSummaryResponse(response);

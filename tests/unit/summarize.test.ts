@@ -134,10 +134,19 @@ describe("runSummarizeCall", () => {
     });
     assert.equal(calls[0]?.options.maxTokens, 4096);
     assert.equal(calls[0]?.options.cacheRetention, "none");
-    assert.equal(calls[0]?.options.toolChoice, "none");
     assert.equal(calls[0]?.options.reasoning, "high");
     assert.equal(calls[0]?.options.sessionId, "session-1");
+    // No tool choice of its own: the request shape is replayed from the last
+    // real request, and a `tool_choice: "none"` here would create a different
+    // cache entry (measured on DeepSeek).
+    assert.equal("toolChoice" in (calls[0]?.options ?? {}), false);
+    assert.equal(typeof calls[0]?.options.onPayload, "function");
     assert.equal("apiKey" in (calls[0]?.options ?? {}), false);
+
+    // The payload callback reapplies the captured shape onto the adapter's build.
+    const built = { messages: ["ours"], max_tokens: 8, model: "m" };
+    const merged = (calls[0]?.options.onPayload as (payload: unknown) => unknown)(built) as Record<string, unknown>;
+    assert.deepEqual(merged, built);
   });
 
   it("omits reasoning when the call runs without thinking", async () => {

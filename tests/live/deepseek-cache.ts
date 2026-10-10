@@ -176,7 +176,7 @@ async function main(): Promise<void> {
       complete,
     );
 
-  // Cache construction takes seconds; retry once before measuring.
+  // Cache construction takes seconds. Retry once before measuring.
   let outcome = await attempt();
   if ((outcome.usage?.cacheRead ?? 0) === 0) {
     await sleep(5_000);

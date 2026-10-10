@@ -1,5 +1,5 @@
 // Entry point for the prefix-preserving compaction extension. Pi keeps its own
-// trigger policy, `CompactionEntry`, `firstKeptEntryId`, and `/compact`; this
+// trigger policy, `CompactionEntry`, `firstKeptEntryId`, and `/compact`. This
 // extension only replaces how the summary text is produced: it replays Pi's own
 // session projection up to the compaction cut and appends one instruction
 // message. Because the projection is what a normal request sends, the provider
@@ -34,6 +34,7 @@ import {
   resolveThinkingLevel,
 } from "./resolve.ts";
 import { loadPiCompactionSettings } from "./settings.ts";
+import { payloadShell, replayForCapture } from "./replay.ts";
 import { buildStatusReport, collectRollingStats, formatRatio } from "./status.ts";
 import { assertSummaryShrinks, runSummarizeCall, type CompleteFunction } from "./summarize.ts";
 import type { ExtensionCompactionDetails, FailureRecord } from "./types.ts";
@@ -75,6 +76,12 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
 
   pi.on("context_with_system", (event, ctx) => {
     captures.capture(sessionIdOf(ctx), sessionModelKey(ctx), event.messages);
+  });
+
+  // Remember the payload Pi actually sent, so the summarize call can replay its
+  // shape. Returning undefined leaves the request untouched.
+  pi.on("before_provider_request", (event, ctx) => {
+    captures.capturePayload(sessionIdOf(ctx), sessionModelKey(ctx), payloadShell(event.payload));
   });
 
   pi.on("session_start", (_event, ctx) => {
@@ -141,14 +148,21 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         fingerprintMessages(slice.messages),
       );
       const sharedPrefixTokens = priceMessages(slice.messages.slice(0, sharedPrefixMessages));
+      // Replay the request shape the provider cached. Rebuilding thinking mode,
+      // tool choice, or tool schemas from settings is what turned previously
+      // served prefixes into full-price misses.
+      const replay = replayForCapture(captured, modelKey(model));
 
       if (config.dryRun) {
+        const shape = replay === undefined
+          ? "no captured request shape to replay"
+          : `replaying ${Object.keys(replay.fields).length} request fields from the last real request`;
         return cancel(
           `dry run: would summarize ${slice.summarized.length} conversation messages`
             + ` (~${shadowedTokens} tokens; ${slice.messages.length} projected messages, ~${prefixTokens} tokens;`
             + ` ${sharedPrefixMessages} shared with ${captured?.modelKey ?? "no"} capture)`
-            + ` as ${modelKey(model)} with maxTokens ${maxTokens}`
-            + ` and cacheRetention ${config.compaction.cacheRetention}`,
+            + ` as ${modelKey(model)} with maxTokens ${maxTokens},`
+            + ` cacheRetention ${config.compaction.cacheRetention}, ${shape}`,
           true,
           "info",
         );
@@ -169,6 +183,7 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
           cacheRetention:
             config.compaction.cacheRetention === "inherit" ? undefined : config.compaction.cacheRetention,
           sessionId: id,
+          ...(replay === undefined ? {} : { replay }),
           signal: event.signal,
         },
         options.complete ?? hostComplete,
@@ -200,6 +215,11 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
           maxTokens,
           thinkingLevel: reasoning ?? null,
           cacheRetention: config.compaction.cacheRetention,
+          replaySource: replay === undefined ? "none" : "capture",
+          ...(replay === undefined ? {} : { replayFields: Object.keys(replay.fields).sort() }),
+          ...(replay === undefined || replay.adjusted.length === 0
+            ? {}
+            : { replayAdjusted: [...replay.adjusted] }),
           prefixMessages: slice.messages.length,
           prefixTokens,
           ...(promptTokens === undefined ? {} : { promptTokens }),
@@ -221,6 +241,9 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         const text = config.notify === "diagnostic"
           ? `${base}; prefix fidelity ${sharedPrefixMessages}/${slice.messages.length}`
             + `; prompt tokens ${promptTokens ?? "n/a"}; model ${modelKey(model)}`
+            + `; request shape ${replay === undefined
+              ? "built from settings"
+              : `replayed (${Object.keys(replay.fields).length} fields)`}`
           : base;
         safeNotify(ctx, text, "info");
       }
@@ -268,12 +291,22 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
       } catch (error: unknown) {
         problems.push(errorMessage(error));
       }
+      const captured = captures.get(id);
+      const capture = captured?.shell === undefined
+        ? undefined
+        : {
+            ageMs: Date.now() - captured.at,
+            modelKey: captured.modelKey,
+            messageCount: captured.shell.messageCount,
+            replayFieldCount: Object.keys(captured.shell.fields).length,
+          };
       const report = buildStatusReport({
         resolution,
         piSettings: settings,
         sessionModelKey: sessionModelKey(ctx),
         summarizeModelKey,
         sameModel,
+        capture,
         stats: collectRollingStats(ctx.sessionManager.getEntries()),
         lastFailure: failures.get(id),
         problems,

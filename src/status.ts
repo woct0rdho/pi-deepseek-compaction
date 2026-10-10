@@ -84,9 +84,26 @@ export interface StatusReportParams {
   sessionModelKey: string;
   summarizeModelKey: string;
   sameModel: boolean;
+  // The last real request Pi sent, as observed by this session's capture.
+  capture: CapturedRequestSummary | undefined;
   stats: RollingStats;
   lastFailure: FailureRecord | undefined;
   problems: readonly string[];
+}
+
+// What the summarize call will replay: the shape of the last real request.
+export interface CapturedRequestSummary {
+  ageMs: number;
+  modelKey: string;
+  // Messages of the last real request, and its replayed field count.
+  messageCount: number;
+  replayFieldCount: number;
+}
+
+function formatAge(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  return `${Math.round(ms / 60_000)} min`;
 }
 
 export function buildStatusReport(params: StatusReportParams): string {
@@ -105,6 +122,11 @@ export function buildStatusReport(params: StatusReportParams): string {
     `Session model: ${params.sessionModelKey}`,
     `Summarize model: ${params.summarizeModelKey}`
       + (params.sameModel ? " (same model: prefix reuse expected)" : " (different model: prefix reuse not expected)"),
+    params.capture === undefined
+      ? "Replay source: no real request captured yet (the shape is built from settings)"
+      : `Replay source: last real request ${formatAge(params.capture.ageMs)} ago`
+        + ` (${params.capture.modelKey}, ${params.capture.messageCount} messages,`
+        + ` ${params.capture.replayFieldCount} non-message fields to replay)`,
     `Pi settings: reserve ${params.piSettings.reserveTokens}, keepRecent ${params.piSettings.keepRecentTokens}`,
     `Compactions by this extension: ${stats.count} (other compactions skipped: ${stats.otherCompactions})`,
   ];
@@ -114,6 +136,12 @@ export function buildStatusReport(params: StatusReportParams): string {
       `Last:    cacheRead ${details.cacheRead} / prefixTokens ${details.prefixTokens}`
         + ` = ${formatRatio(details.cacheRead, details.prefixTokens)}`
         + `   prefix fidelity ${details.sharedPrefixMessages}/${details.prefixMessages} messages`
+        + (details.replayFields === undefined
+          ? "   shape built from settings"
+          : `   shape replayed (${details.replayFields.length} fields)`)
+        + (details.replayAdjusted === undefined
+          ? ""
+          : `, dropped ${details.replayAdjusted.join(", ")}`)
         + `   (${details.reason}, ${details.modelKey})`,
     );
   } else {

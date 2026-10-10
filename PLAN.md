@@ -4,7 +4,7 @@
 
 The package name mentions DeepSeek because that is the primary target, but the extension is provider-generic: it uses only Pi's session projection and Pi's provider stack, with no provider-specific protocol or endpoint.
 
-Requires Pi 1.0 or newer. The extension uses `buildSessionProjection`, `pi.getSettings()`, the `context_with_system` hook, and `ModelRegistry.streamSimple`, and deliberately has no fallback path for older versions.
+Requires Pi 1.0 or newer. The extension uses `buildSessionProjection`, `pi.getSettings()`, the `context_with_system` and `before_provider_request` hooks, and `ModelRegistry.streamSimple`, and deliberately has no fallback path for older versions.
 
 ## Goal
 
@@ -13,6 +13,7 @@ The summarize request must be a byte prefix of a request the provider has alread
 | Requirement | How it is met |
 | --- | --- |
 | The summarize request's system message, tool loadout, and leading messages match a prior real request | The request is Pi's own session projection, cut at Pi's compaction boundary, sent through the same adapter as a real turn |
+| The request shape keying the provider's cache is the one that was already cached | The payload Pi sent for the last real request (`before_provider_request`) is captured and replayed field for field, messages and output cap excepted |
 | The provider serves the prefix from cache | The prefix is identical by construction. The status command measures the ratio instead of promising a rate |
 | Successful compactions use Pi's normal data structures | An ordinary `compaction` entry with `summary`, `firstKeptEntryId`, `tokensBefore`, `usage`, and `details` |
 | Failures leave the conversation untouched | Every failure path returns `{ cancel: true }`. No entry is written and Pi's compactor is never invoked |
@@ -24,6 +25,7 @@ The summarize request must be a byte prefix of a request the provider has alread
 | --- | --- |
 | `session_before_compact` | The extension's whole job: read `event.preparation`, `event.branchEntries`, `event.reason`, `event.customInstructions`, `event.signal`. Return `{ compaction }` or `{ cancel: true }` |
 | `context_with_system` | Read-only capture of the transcript a real request is about to send, including system messages, for prefix-fidelity diagnostics |
+| `before_provider_request` | Read-only capture of the payload Pi actually sends, so the summarize call can replay its shape instead of rebuilding it |
 | `session_start`, `session_shutdown`, `session_before_switch`, `session_before_fork`, `session_before_tree`, `session_compact` | Drop or rebuild in-memory capture state |
 | `registerCommand` | `/deepseek-compaction`: resolved models, Pi's settings, the last compaction's ratio, the rolling ratio, and the last failure reason |
 
@@ -58,13 +60,30 @@ const outcome = await runSummarizeCall({
   reasoning,
   cacheRetention,          // undefined keeps the retention a normal turn uses
   sessionId,               // same routing id as a normal turn
+  replay,                  // request shape of the last real request, when captured
   signal: event.signal,
 }, complete);              // ctx.modelRegistry.streamSimple(...).result()
 ```
 
-No `systemPrompt` and no `tools` are passed, and that is what makes the prefix exact. pi-ai's adapters derive the wire system prompt from the transcript's system messages (`resolveTranscript`) and the wire tool loadout from the transcript's tool declarations (`resolveTranscriptTools` → `getCurrentTools`), and the transcript persists full tool definitions in `toolsAdded`. Supplying only the projected messages therefore reproduces a real request's bytes by construction, with no reconstruction of the prompt or the tool schemas anywhere in the extension.
+No `systemPrompt` and no `tools` are passed, and that is what makes the prefix exact. pi-ai's adapters derive the wire system prompt from the transcript's system messages (`resolveTranscript`) and the wire tool loadout from the transcript's tool declarations (`resolveTranscriptTools` -> `getCurrentTools`), and the transcript persists full tool definitions in `toolsAdded`. Supplying only the projected messages therefore reproduces a real request's bytes by construction, with no reconstruction of the prompt or the tool schemas anywhere in the extension.
 
 The call also forwards the session id and leaves cache retention at its default, so cache-affinity routing and explicit cache markers land where a normal turn puts them.
+
+### Request-shape replay
+
+Identical prompt bytes are necessary but not sufficient: the provider's cache identity also covers the rest of the request. Measured against DeepSeek with a 340k-token prefix, changing only `tool_choice` (`"none"` instead of absent, with the same tool schemas declared) turned a cache hit into a 0% read, and changing only the thinking mode (`max` to `high`, or `off`) did the same. `max_tokens`, `temperature`, and `tool_choice` in a request that declares no tools made no difference. DeepSeek's own harness documents the same rule for tool schemas and model route. Tool schemas, thinking mode, and tool choice therefore key the cache exactly like the prompt does.
+
+Rebuilding those fields from resolved settings is what caused every summarize call to miss until the cause was found. Rebuilding them correctly would still be a maintenance burden and would drift silently the moment Pi or a provider changes a field. Instead, a `before_provider_request` handler stores the payload Pi produced for the last real request, minus its messages, and the summarize call reapplies that stored shape in its own `onPayload` callback, after pi-ai has built the payload from the replayed transcript:
+
+```
+shell = payload minus messages minus output caps   # captured from the last real request
+built = adapter(context, options)                  # our messages, our cap
+sent  = built with shell overlaid, messages and caps from built
+```
+
+Messages and output caps are the only fields the summarize call owns; everything else - `tools`, `thinking`, `reasoning_effort`, `tool_choice`, `stream_options`, and any provider-specific field this file has never heard of - is the exact value the provider already cached. A capture is used only when it belongs to the same model as the summarize call, because a different model is a different cache domain. Without a capture (first request of a session, or a different summarize model) the shape is built from the resolved settings as before, and `details.replaySource` records which case applied.
+
+Two deliberate deviations are recorded rather than silently applied: the output cap is always the summarize call's own, and a forced tool choice (`"required"` or a named function) is dropped, because replaying it would make the model call a tool instead of writing a checkpoint. A neutral value (`"auto"`, `"none"`, or absent) replays verbatim. Dropping a forced choice forfeits the cache read for that call; it is listed in `details.replayAdjusted`.
 
 ### Prefix diagnostics
 
@@ -74,7 +93,7 @@ A read-only `context_with_system` handler fingerprints every message a real requ
 
 `INSTRUCTION_VERSION` is recorded with every compaction so a stored summary can be traced to the prompt that produced it. `event.customInstructions` from `/compact <text>` is appended as an `Additional focus:` paragraph.
 
-`toolChoice: "none"` is always sent. The instruction also forbids tool use, and a returned tool call fails validation.
+`toolChoice` is never set by the extension. The request shape comes from the captured payload, and the instruction forbids tool use, so a returned tool call fails validation.
 
 ## What we return to Pi
 
@@ -129,9 +148,10 @@ Config: ~/.pi/agent/deepseek-compaction.json (found) + <project>/.pi/deepseek-co
 Effective: model=(session) thinkingLevel=high maxTokens=0.8 x reserve cacheRetention=inherit fileLists=true dryRun=false
 Session model: deepseek/deepseek-flash
 Summarize model: deepseek/deepseek-flash (same model: prefix reuse expected)
+Replay source: last real request 4.1 s ago (deepseek/deepseek-flash, 812 messages, 6 non-message fields to replay)
 Pi settings: reserve 16384, keepRecent 20000
 Compactions by this extension: 2 (other compactions skipped: 0)
-Last:    cacheRead 1152 / prefixTokens 1778 = 0.65   prefix fidelity 3/3 messages   (threshold, deepseek/deepseek-flash)
+Last:    cacheRead 1152 / prefixTokens 1778 = 0.65   prefix fidelity 3/3 messages   shape replayed (6 fields)   (threshold, deepseek/deepseek-flash)
 Rolling: cacheRead 2304 / prefixTokens 15976 = 0.14
 Last failure: none
 ```
@@ -141,6 +161,8 @@ Definitions:
 - `prefixTokens` is a fold of Pi's exported `estimateTokens` over the messages the summarize call sent, system messages included. Pi exposes no estimator for an arbitrary message array, so no tokenizer and no per-provider pricing are involved. Tool schemas are excluded because Pi's estimator prices messages only, which understates the ratio slightly. The provider-reported prompt size is recorded as `promptTokens` for an exact cross-check. A ratio slightly above 1.0 is possible and is not clamped.
 - `ratio` is `cacheRead / prefixTokens` for one compaction. The rolling figure is `sum(cacheRead) / sum(prefixTokens)` with the count, so one entry cannot masquerade as a trend.
 - `prefix fidelity` is `sharedPrefixMessages / prefixMessages` for the last compaction. It separates the two failure modes: a low ratio with full fidelity means the provider did not cache, while a low fidelity means the prefix no longer matched the real request.
+- `Replay source` is the shape of the last real request the summarize call will reuse. It also separates the same two failure modes: without a capture (or with a capture from another model) the shape is rebuilt from settings, which is the one case where an identical prefix can still miss.
+- `shape replayed (n fields)` in the last-compaction line is what the summarize call actually reused, and `dropped tool_choice` marks the one field a forced tool choice can never replay.
 - Compactions made by Pi's default compactor or by another extension have no `details.dshCompaction`. They are counted as `other compactions skipped` and excluded from the ratio.
 - The last failure reason is process-local, because failures write no session entry. It is cleared at `session_start` and by the next successful compaction.
 
@@ -209,11 +231,13 @@ In print and JSON modes there is no dialog-capable UI, so notifications fall bac
 ## Provider and cache notes
 
 The extension contains nothing provider-specific. Only the cache expectations differ:
+- Cache identity is the prompt *and* the request shape: tool schemas, thinking mode, tool choice, and provider-specific fields. Measured on DeepSeek, an otherwise identical 340k-token request missed entirely when only `tool_choice` or only the thinking mode changed; `max_tokens` and `temperature` did not matter. Replaying the payload Pi already sent covers this without naming a single field, so a provider that adds a new cache-relevant field stays aligned.
 - Automatic prefix caching (DeepSeek, OpenAI, most OpenAI-compatible servers, implicit caches elsewhere): an identical prefix is sufficient. DeepSeek caches automatically with no write API, expires entries within hours to days, and reports hits as `prompt_cache_hit_tokens`, which pi-ai maps to `usage.cacheRead`.
 - Explicit cache-marker providers (Anthropic-style `cache_control`): the default `cacheRetention: "inherit"` reproduces what normal turns send, so markers and their positions match and the replayed prefix is readable.
 - Mid-conversation system messages: providers that support them keep prompt and tool patches in place, so the prefix stays byte-stable across a change. Providers that do not (DeepSeek) get the patches collapsed into the leading system message, which changes the head of every request after a change. Exactness holds either way because the summarize call and the real turn share the transcript and adapter. What changes is whether a prompt or tool change also costs a normal turn its cache entry.
 - Cache granularity is provider-defined and hits are best-effort. A provider can take seconds to build the cache entry for the newest request, so a large tool result added moments earlier may not be cached yet even though the prefix matches exactly. The status ratio is the honest measure.
-- Caches are per-model, so prefix reuse applies only when the configured summarization model equals the session model.
+- Caches are per-model, so prefix reuse applies only when the configured summarization model equals the session model. The capture follows the same rule: a payload captured for another model is never replayed.
+- A configured `compaction.thinkingLevel` is honored only when there is no same-model capture to replay. When there is one, the replayed shape wins, because a summary that runs at a different thinking mode is a different cache entry and would re-bill the whole prefix. `details.thinkingLevel` records what the extension resolved, and `details.replayFields` records what was actually sent.
 - Coverage is DeepSeek. Other providers are expected to work unchanged, and the status ratio is the way to find out.
 
 ## Composability
@@ -247,7 +271,8 @@ The extension registers no provider, patches no payload, and mutates no session 
     resolve.ts          # model / thinking level / output cap resolution, ConfigProblem
     summarize.ts        # injected-completion summarize call, response validation, shrink check
     fileops.ts          # read/write/edit extraction, cumulative merge, <read-files> formatting
-    capture.ts          # per-session request fingerprints
+    capture.ts          # per-session request fingerprints and payload shape
+    replay.ts           # capture, adjust, and reapply the payload shape
     status.ts           # rolling statistics and status report text
     types.ts            # config, details, and record types
   scripts/smoke.mjs           # offline module smoke test
@@ -260,8 +285,8 @@ The extension registers no provider, patches no payload, and mutates no session 
 ## Testing
 
 - Unit tests (`npm run test:unit`): projection slicing (plain entries, previous compaction replay, system prompt state kept out of the summarized span, context-edit omission applied through Pi's own `buildSessionProjection`, missing-cut and empty-span errors), instruction building with and without `customInstructions`, response validation (empty, tool call, length stop, non-shrinking), file-operation accumulation across our own `details` and Pi's flat shape, config precedence and rejected values, model and thinking resolution, pricing and fingerprint behaviour, rolling statistics, and the summarize call envelope through an injected completion function.
-- Wire test (`npm run test:wire`): a local `node:http` mock answers `POST /chat/completions`, driving pi-ai's real `openai-completions` provider. Three cases run: auto-detected compatibility, DeepSeek compatibility with replayed reasoning content, and a transcript that exercises the mid-session mechanisms — a prompt section patch, a tool loadout change, and context edits that omit a failed attempt. Each case captures a real request and the summarize request and asserts that the summarize body's leading messages are deep-equal to the real request's, that the tool loadout matches, that omitted content is absent from both, and that the instruction is the only message after the prefix.
-- End-to-end check (`npm run test:e2e`): spawns Pi itself against a local mock provider in a scratch project that forces threshold compaction, while a probe extension adds a tool to the loadout on the second turn. Every captured summarize request must equal the preceding real request's prefix plus the instruction, with identical tools across both loadouts. Requires `pi` on PATH.
+- Wire test (`npm run test:wire`): a local `node:http` mock answers `POST /chat/completions`, driving pi-ai's real `openai-completions` provider. Five cases run: auto-detected compatibility, DeepSeek compatibility with replayed reasoning content, a neutral tool choice replayed verbatim, a forced tool choice dropped while the rest of the shape survives, and a transcript that exercises the mid-session mechanisms - a prompt section patch, a tool loadout change, and context edits that omit a failed attempt. Each case captures a real request and the summarize request and asserts that the summarize body's leading messages are deep-equal to the real request's, that the request shape (every non-message field except the output cap) is identical, that the tool loadout matches, that omitted content is absent from both, and that the instruction is the only message after the prefix. The shape assertion is what fails if the summarize call ever reintroduces a field the provider does not have cached for real turns: a `tool_choice: "none"` there was enough to make every DeepSeek summarize call a full-price miss.
+- End-to-end check (`npm run test:e2e`): spawns Pi itself against a local mock provider in a scratch project that forces threshold compaction, while a probe extension adds a tool to the loadout on the second turn. Every captured summarize request must equal the preceding real request's prefix plus the instruction, with identical tools and request shape across both loadouts. Requires `pi` on PATH.
 - Smoke script (`npm run smoke`): runs the pure modules on a fixture and checks the documented defaults and formats.
 - Live measurement (`npm run test:live`, opt-in): replays a fixture prefix a previous request just sent and asserts `cacheWrite == 0` and `cacheRead > 0`, retrying once because cache construction takes seconds, then reports the measured ratio. On `deepseek-flash` it measured `cacheRead 256 / prefix ~289 = 0.89`, costing under one tenth of a cent.
 
@@ -274,4 +299,5 @@ Cost rule: the default test run is entirely offline. Only the live measurement c
 - A `before_agent_start` handler can force a per-turn system prompt that is deliberately not recorded in the transcript. A compaction at the end of such a turn replays the recorded prompt and misses that one turn's cache.
 - Split turns produce one summary spanning the whole prefix rather than Pi's two-call history-plus-prefix merge. The instruction's `Current Work` and `Next Step` sections carry that role.
 - Cancelling on failure means a failed overflow compaction leaves the turn failed, with no automatic fallback. This is intentional and is covered by tests.
-- Deferred: a retry without `toolChoice` when a server rejects it alongside a non-empty tool list, a manual recall benchmark against Pi's default compactor, and tool-result truncation at `tool_result` time (which is cache-neutral because it happens before a result enters any request).
+- Deferred: a manual recall benchmark against Pi's default compactor, and tool-result truncation at `tool_result` time (which is cache-neutral because it happens before a result enters any request).
+- The captured request shape is process-local, like the fingerprint capture. A session resumed in a new process replays the prefix but builds the shape from settings until a real turn has sent one request, so the first compaction after a resume can miss if the shape differs from the settings. The status command shows `Replay source: no real request captured yet` for exactly that window.

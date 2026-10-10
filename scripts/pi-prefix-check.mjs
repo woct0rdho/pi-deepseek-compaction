@@ -67,6 +67,12 @@ const server = createServer((request, response) => {
 });
 
 const fingerprint = value => createHash("sha1").update(JSON.stringify(value)).digest("hex").slice(0, 10);
+const CAP_FIELDS = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
+// The request shape a provider keys its prompt cache on: every field except the
+// message list and the output cap the summarize call sizes for itself.
+const shape = payload => Object.fromEntries(
+  Object.entries(payload).filter(([key]) => key !== "messages" && !CAP_FIELDS.includes(key)),
+);
 const isSummarize = payload => {
   const messages = payload.messages ?? [];
   return messages.length > 0 && JSON.stringify(messages.at(-1)).includes("compaction engine");
@@ -94,13 +100,19 @@ function check() {
     ) shared += 1;
     const prefixOk = shared === summarizeMessages.length - 1 && shared <= realMessages.length;
     const toolsOk = fingerprint(call.tools) === fingerprint(prior.tools);
+    const optionsOk = fingerprint(shape(call)) === fingerprint(shape(prior));
     const toolNames = (call.tools ?? []).map(tool => tool.function?.name);
     console.log(
       `e2e: summarize #${index} vs real #${requests.indexOf(prior)}:`
         + ` shared ${shared}/${summarizeMessages.length - 1} prefix messages, prefix_ok=${prefixOk},`
-        + ` tools_ok=${toolsOk}, tools=[${toolNames.join(", ")}]`,
+        + ` tools_ok=${toolsOk}, options_ok=${optionsOk}, tools=[${toolNames.join(", ")}]`,
     );
-    if (!prefixOk || !toolsOk) failures += 1;
+    if (!optionsOk) {
+      const keys = new Set([...Object.keys(shape(call)), ...Object.keys(shape(prior))]);
+      const differing = [...keys].filter(key => fingerprint(shape(call)[key]) !== fingerprint(shape(prior)[key]));
+      console.log(`e2e:   request shape differs in: ${differing.join(", ")} (a provider would cache these separately)`);
+    }
+    if (!prefixOk || !toolsOk || !optionsOk) failures += 1;
   }
   const toolSets = new Set(requests.map(payload => JSON.stringify((payload.tools ?? []).map(t => t.function?.name))));
   if (toolSets.size < 2) {
@@ -210,3 +222,7 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log("e2e: ok");
+// The mock server keeps the event loop alive, so close it (including any
+// keep-alive sockets Pi left behind) before exiting.
+server.closeAllConnections();
+server.close();

@@ -51,9 +51,20 @@ export interface PrefixCompactionDetails {
   // `provider/model` resolved for the summarize call.
   summarizationModelKey: string;
   maxTokens: number;
-  // Thinking level sent, or null when the call ran without thinking.
+  // Thinking level the extension resolved. With a captured request shape the
+  // sent thinking mode is the replayed one, not necessarily this value.
   thinkingLevel: SummarizeThinkingLevel | null;
   cacheRetention: ConfiguredCacheRetention;
+  // Whether a same-model capture of the last real request was available: the
+  // summarize call replays that request's shape (thinking mode, tool choice,
+  // tool schemas, provider extras) instead of rebuilding it from settings.
+  replaySource?: "capture" | "none";
+  // Replayed non-message payload fields, sorted. Messages and the output cap are
+  // always the summarize call's own.
+  replayFields?: string[];
+  // Captured fields left out of the replay because replaying them would force a
+  // tool call (for example `tool_choice: "required"`).
+  replayAdjusted?: string[];
   // Messages replayed before the instruction.
   prefixMessages: number;
   // Heuristic price of the system prompt plus prefix messages.
