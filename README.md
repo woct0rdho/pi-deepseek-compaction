@@ -8,7 +8,7 @@ A Pi extension that replaces Pi's compaction summary generation with a prefix-pr
 
 ## Install
 
-Requires Pi 1.0 or newer. The extension uses the host's session projection, settings, `context_with_system` and `before_provider_request` hooks, and provider stack, and has no fallback path for older versions.
+Requires Pi 1.3 or newer. The extension uses the host's session projection, settings, `context_with_system` and `before_provider_request` hooks, and provider stack, and has no fallback path for older versions.
 
 No provider or API is hardcoded. The extension works wherever Pi can make a normal request. It uses the current session model and Pi's model registry (`ctx.modelRegistry.streamSimple()`), so configured providers, OAuth, proxies, and custom base URLs keep working.
 
@@ -48,7 +48,7 @@ There is no `enabled` flag. Loading the extension is the switch. Configuration i
 
 - Triggers: Pi's threshold compaction, overflow recovery, and `/compact` all route through the extension's `session_before_compact` handler.
 - The prefix: Pi's canonical session projection (`buildSessionProjection`) is truncated at `firstKeptEntryId`, so appended context edits, prompt section patches, and tool loadout changes are honored and the request is a byte prefix of what the provider already served. Split turns need no special case. The early part of the turn is simply replayed in place. No `systemPrompt` and no tool schemas are rebuilt - the provider adapter derives both from the replayed transcript, exactly as it does for a real turn - and the summarize call forwards the session id, so session-affinity caching routes it to the same cache as real turns.
-- The request shape: a `before_provider_request` handler stores the payload Pi produced for the last real turn, and the summarize call reapplies it after the adapter builds its own payload. Messages and the output cap are the summarize call's; `tools`, `thinking`, `reasoning_effort`, `tool_choice`, and any provider-specific field are the ones the provider already cached. The capture is used only for the model it was captured from. If it is missing (first request of a session, or a different summarize model), the shape falls back to the resolved model and thinking level. A forced tool choice (`"required"` or a named function) is never replayed, because it would make the model call a tool instead of writing a checkpoint; neutralizing it costs that call's cache read and is recorded in the entry details.
+- The request shape: a `before_provider_request` handler stores the payload Pi produced for the last real turn, and the summarize call reapplies it after the adapter builds its own payload. Messages and the output cap are the summarize call's. `tools`, `thinking`, `reasoning_effort`, `tool_choice`, and any provider-specific field are the ones the provider already cached. The capture is used only for the model it was captured from. If it is missing (first request of a session, or a different summarize model), the shape falls back to the resolved model and thinking level. A forced tool choice (`"required"` or a named function) is never replayed, because it would make the model call a tool instead of writing a checkpoint. Neutralizing it costs that call's cache read and is recorded in the entry details.
 - Validation: the summary must be non-empty text, must not call tools, must not be truncated, and must be strictly smaller than the history it replaces.
 - Failures cancel: nothing is written and Pi's built-in summarizer is never invoked, so a failure leaves the conversation exactly as it was. The reason appears as a warning, or on stderr in print and JSON modes.
 - Never silent: `/deepseek-compaction` reports the effective configuration, the resolved models, the replay source (the captured shape of the last real request), the last compaction's `cacheRead / prefixTokens` ratio, the rolling ratio over all compactions this extension recorded in the session, prefix fidelity (`sharedPrefixMessages / prefixMessages`), and the last failure.
@@ -59,7 +59,7 @@ Cache reads are best-effort and provider-defined. A provider may not have finish
 
 ```bash
 npm test          # typecheck, unit tests, wire test, smoke. Offline, no provider calls
-npm run test:e2e  # offline. Real Pi 1.0.x against a local mock provider (needs `pi` on PATH)
+npm run test:e2e  # offline. Real Pi 1.3 against a local mock provider (needs `pi` on PATH)
 npm run test:live # opt-in. Requires PI_DEEPSEEK_COMPACTION_LIVE=1 and a DeepSeek key
 ```
 

@@ -1,4 +1,4 @@
-// End-to-end prefix check: runs Pi (1.0.x) against a local mock provider,
+// End-to-end prefix check: runs Pi (1.3.x) against a local mock provider,
 // forces a compaction, and asserts that the summarize request reproduces the
 // real request's wire prefix byte for byte - including across a mid-session tool
 // loadout change, which also makes Pi append a prompt section patch and a tool

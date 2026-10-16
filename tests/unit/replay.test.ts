@@ -52,6 +52,19 @@ describe("payloadShell", () => {
     for (const field of OUTPUT_CAP_FIELDS) assert.equal(field in shell!.fields, false);
   });
 
+  it("skips option keys the adapter left undefined", () => {
+    // pi-ai 1.3 sets prompt_cache_key/prompt_cache_retention on the payload
+    // object for providers that do not use them. JSON serialization drops them,
+    // so they are not part of the shape a provider could have cached.
+    const shell = payloadShell({
+      messages: [],
+      model: "deepseek-flash",
+      prompt_cache_key: undefined,
+      prompt_cache_retention: undefined,
+    });
+    assert.deepEqual(shell?.fields, { model: "deepseek-flash" });
+  });
+
   it("reports no shell for payloads that are not objects", () => {
     assert.equal(payloadShell(undefined), undefined);
     assert.equal(payloadShell("stream"), undefined);

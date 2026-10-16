@@ -61,7 +61,12 @@ export function payloadShell(payload: unknown): RequestPayloadShell | undefined 
   const fields: Record<string, unknown> = {};
   for (const key of Object.keys(payload)) {
     if (key === MESSAGES_FIELD || isOutputCapField(key)) continue;
-    fields[key] = payload[key];
+    const value = payload[key];
+    // Adapters leave some option keys undefined (pi-ai 1.3 sets prompt_cache_key
+    // and prompt_cache_retention for providers that do not use them). Those keys
+    // never reach the wire, so they are not part of the shape being replayed.
+    if (value === undefined) continue;
+    fields[key] = value;
   }
   const messages = payload[MESSAGES_FIELD];
   const shell: RequestPayloadShell = {
