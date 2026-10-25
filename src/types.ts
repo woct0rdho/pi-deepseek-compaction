@@ -28,6 +28,8 @@ export interface ResolvedConfig {
   compaction: CompactionConfig;
   // Append Pi's `<read-files>` / `<modified-files>` blocks to the summary.
   fileLists: boolean;
+  // Ask a loaded file-list filter to drop paths that no longer exist.
+  filterMissingFiles: boolean;
   notify: NotifyPolicy;
   // Build and report the request without calling the model.
   dryRun: boolean;
@@ -83,6 +85,9 @@ export interface PrefixCompactionDetails {
   shadowedTokens: number;
   reason: "manual" | "threshold" | "overflow";
   customInstructionsUsed: boolean;
+  // Paths removed from the file lists because they no longer exist on disk.
+  // Absent when nothing was removed or no file-list filter answered.
+  droppedFiles?: string[];
 }
 
 // Pi's own file lists, kept at the top level of the entry details.

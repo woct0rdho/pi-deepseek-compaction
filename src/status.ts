@@ -4,6 +4,7 @@
 // details, so they survive resume, fork, and tree navigation.
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { FileListFilterStatus } from "./existing.ts";
 import type {
   ConfigResolution,
   FailureRecord,
@@ -87,6 +88,7 @@ export interface StatusReportParams {
   // The last real request Pi sent, as observed by this session's capture.
   capture: CapturedRequestSummary | undefined;
   stats: RollingStats;
+  fileFilter: FileListFilterStatus;
   lastFailure: FailureRecord | undefined;
   problems: readonly string[];
 }
@@ -110,7 +112,7 @@ export function buildStatusReport(params: StatusReportParams): string {
   const { config } = params.resolution;
   const { stats } = params;
   const lines: string[] = [
-    "deepseek-compaction: loaded (Pi-owned enablement; notify " + config.notify + ")",
+    "deepseek-compaction: loaded (Pi-owned enablement. Notify " + config.notify + ")",
     `Config: ${params.resolution.globalPath} (${params.resolution.globalFound ? "found" : "missing"})`
       + ` + ${params.resolution.projectPath} (${params.resolution.projectFound ? "found" : "missing"})`,
     `Effective: model=${config.compaction.model || "(session)"}`
@@ -118,6 +120,7 @@ export function buildStatusReport(params: StatusReportParams): string {
       + ` maxTokens=${config.compaction.maxTokens > 0 ? config.compaction.maxTokens : "0.8 x reserve"}`
       + ` cacheRetention=${config.compaction.cacheRetention}`
       + ` fileLists=${config.fileLists}`
+      + ` filterMissingFiles=${config.filterMissingFiles}`
       + ` dryRun=${config.dryRun}`,
     `Session model: ${params.sessionModelKey}`,
     `Summarize model: ${params.summarizeModelKey}`
@@ -144,8 +147,24 @@ export function buildStatusReport(params: StatusReportParams): string {
           : `, dropped ${details.replayAdjusted.join(", ")}`)
         + `   (${details.reason}, ${details.modelKey})`,
     );
+    if (details.droppedFiles !== undefined) {
+      lines.push(`         dropped ${details.droppedFiles.length} missing path${details.droppedFiles.length === 1 ? "" : "s"} from the file lists`);
+    }
   } else {
     lines.push("Last:    none recorded by this extension");
+  }
+  if (!config.filterMissingFiles) {
+    lines.push("File lists: filtering disabled (filterMissingFiles=false)");
+  } else if (params.fileFilter.last !== undefined) {
+    const last = params.fileFilter.last;
+    lines.push(
+      `File lists: last check dropped ${last.dropped} of ${last.checked} path${last.checked === 1 ? "" : "s"}`
+        + ` (${formatAge(Date.now() - last.at)} ago)`,
+    );
+  } else if (params.fileFilter.unavailable) {
+    lines.push("File lists: no filter extension answered. Paths are kept as Pi extracts them");
+  } else {
+    lines.push("File lists: filter extension available, no check yet");
   }
   lines.push(
     `Rolling: cacheRead ${stats.cacheRead} / prefixTokens ${stats.prefixTokens}`

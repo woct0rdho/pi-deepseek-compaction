@@ -34,6 +34,7 @@ describe("loadConfig", () => {
     assert.deepEqual(resolution.config, {
       compaction: { model: "", thinkingLevel: "", maxTokens: 0, cacheRetention: "inherit" },
       fileLists: true,
+      filterMissingFiles: true,
       notify: "off",
       dryRun: false,
     });
@@ -62,12 +63,14 @@ describe("loadConfig", () => {
       PI_DEEPSEEK_COMPACTION_NOTIFY: "diagnostic",
       PI_DEEPSEEK_COMPACTION_THINKING_LEVEL: "off",
       PI_DEEPSEEK_COMPACTION_CACHE_RETENTION: "long",
+      PI_DEEPSEEK_COMPACTION_FILTER_MISSING_FILES: "0",
       PI_DEEPSEEK_COMPACTION_DRYRUN: "1",
     });
     assert.equal(config.compaction.model, "env-model");
     assert.equal(config.compaction.maxTokens, 2048);
     assert.equal(config.compaction.thinkingLevel, "off");
     assert.equal(config.compaction.cacheRetention, "long");
+    assert.equal(config.filterMissingFiles, false);
     assert.equal(config.notify, "diagnostic");
     assert.equal(config.dryRun, true);
   });
@@ -93,6 +96,15 @@ describe("loadConfig", () => {
     assert.equal(resolution.config.compaction.model, "");
     assert.equal(resolution.config.compaction.thinkingLevel, "");
     assert.deepEqual(resolution.problems, []);
+  });
+
+  it("reads filterMissingFiles from the project file and rejects invalid values", () => {
+    const enabled = scaffold({}, { filterMissingFiles: false });
+    assert.equal(loadConfig(enabled.cwd, { PI_CODING_AGENT_DIR: enabled.agentDir }).config.filterMissingFiles, false);
+    const invalid = scaffold({ filterMissingFiles: "sometimes" });
+    const resolution = loadConfig(invalid.cwd, { PI_CODING_AGENT_DIR: invalid.agentDir });
+    assert.equal(resolution.config.filterMissingFiles, true);
+    assert.equal(resolution.problems.length, 1);
   });
 
   it("treats a malformed file as missing", () => {

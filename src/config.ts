@@ -44,6 +44,7 @@ const DEFAULT_COMPACTION: CompactionConfig = {
 const DEFAULT_CONFIG: ResolvedConfig = {
   compaction: DEFAULT_COMPACTION,
   fileLists: true,
+  filterMissingFiles: true,
   notify: "off",
   dryRun: false,
 };
@@ -172,6 +173,12 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): C
   const config: ResolvedConfig = {
     compaction,
     fileLists: resolveField(layer("FILE_LISTS", "fileLists"), toBoolean, DEFAULT_CONFIG.fileLists, problems),
+    filterMissingFiles: resolveField(
+      layer("FILTER_MISSING_FILES", "filterMissingFiles"),
+      toBoolean,
+      DEFAULT_CONFIG.filterMissingFiles,
+      problems,
+    ),
     notify: resolveField(
       layer("NOTIFY", "notify"),
       value => toMember(value, NOTIFY_POLICIES),

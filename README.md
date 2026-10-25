@@ -4,7 +4,7 @@ A Pi extension that replaces Pi's compaction summary generation with a prefix-pr
 - The summarize request replays the exact leading transcript a real turn already sent - the system message that declares the prompt and tool loadout, later prompt/tool updates, context edits applied, and the conversation up to Pi's cut - then appends one instruction message. Providers with prefix caching (DeepSeek, OpenAI, most OpenAI-compatible servers) serve that prefix from cache, so compaction reads instead of re-billing the whole history.
 - It also replays the rest of the request: the payload Pi sent for the last real turn is captured and reapplied, so the thinking mode, tool choice, and tool schemas are the ones the provider has cached. Only the messages and the output cap belong to the summarize call. A provider's cache identity covers the prompt *and* that shape - on DeepSeek a single re-added `tool_choice` was enough to turn a 340k-token hit into a total miss.
 - The instruction asks for a DSH-style structured checkpoint: Primary Request and Intent, Key Technical Concepts, Files and Code, Errors and Fixes, Pending Jobs, Current Work, Next Step, Critical Context.
-- Pi keeps everything else: its trigger policy, `CompactionEntry`, `firstKeptEntryId`, `details`, `usage`, `/compact [instructions]`, and session/tree semantics. Pi's `<read-files>` / `<modified-files>` blocks are preserved and accumulate across compactions.
+- Pi keeps everything else: its trigger policy, `CompactionEntry`, `firstKeptEntryId`, `details`, `usage`, `/compact [instructions]`, and session/tree semantics. Pi's `<read-files>` / `<modified-files>` blocks are preserved and accumulate across compactions, and paths that no longer exist are dropped when the `file-list-filter` extension is loaded.
 
 ## Install
 
@@ -25,6 +25,7 @@ No provider or API is hardcoded. The extension works wherever Pi can make a norm
     "cacheRetention": "inherit"
   },
   "fileLists": true,
+  "filterMissingFiles": true,
   "notify": "off",
   "dryRun": false
 }
@@ -37,6 +38,7 @@ No provider or API is hardcoded. The extension works wherever Pi can make a norm
 | `compaction.maxTokens` | `0` | Output cap. `0` means Pi's formula, `floor(0.8 * reserveTokens)`, clamped by the model. |
 | `compaction.cacheRetention` | `"inherit"` | `"inherit"` forwards nothing, so pi-ai applies exactly the retention a normal turn uses and cache markers, if any, land in the same place. On automatic-cache providers such as DeepSeek it makes no wire difference. Set `"none"`, `"short"`, or `"long"` to override. |
 | `fileLists` | `true` | Append and accumulate Pi's `<read-files>` / `<modified-files>` blocks. |
+| `filterMissingFiles` | `true` | Ask a loaded `file-list-filter` extension which paths still exist and drop the rest from the blocks and `details`. No effect without that extension. |
 | `notify` | `"off"` | `"off"`, `"summary"` (one line after each success), or `"diagnostic"` (also prefix fidelity and token counts). Failures always notify once as a warning. |
 | `dryRun` | `false` | Build and report the request without calling the model. |
 
@@ -55,11 +57,29 @@ There is no `enabled` flag. Loading the extension is the switch. Configuration i
 
 Cache reads are best-effort and provider-defined. A provider may not have finished building the cache entry for content added seconds earlier, so the ratio is a measurement rather than a guarantee. Prefix fidelity and the replay source tell the failure modes apart: a low ratio with full fidelity and a replayed shape means the provider did not cache, while low fidelity means the prefix no longer matched, and a shape built from settings instead of a capture means the request may have looked different from the one the provider cached.
 
+## File lists
+
+Pi's default compactor builds `<read-files>` / `<modified-files>` from the `path` arguments of `read`, `write`, and `edit` calls. Nothing is checked against the filesystem, so a file that was deleted, renamed, or moved since it was touched stays in the checkpoint, and because the lists accumulate across compactions it can stay there indefinitely.
+
+This extension keeps Pi's lists and adds one optional step: before the blocks are formatted, it asks the loaded `file-list-filter` extension which of the candidate paths still exist and drops the rest from both the summary text and `details.readFiles` / `details.modifiedFiles`. The removed paths are recorded in `details.dshCompaction.droppedFiles`, and `/deepseek-compaction` reports the last check.
+
+The request is a `pi.events` message on channel `file-list-filter/v1/existing`:
+
+```ts
+{ cwd: string, paths: string[], reply(kept: string[]): void }
+```
+
+The reply is the subset that exists. `pi.events` is fire-and-forget, so the reply is a callback. Before the first request the client makes sure a filter is loaded: the service announces itself on `file-list-filter/v1/available` at load and again whenever a caller emits `file-list-filter/v1/discover`, and a client that hears no announcement skips the request entirely. A setup without the filter extension therefore pays nothing, which matters in `--print` runs: waiting out a deadline there can outlive the session. A malformed reply, a reply that does not arrive within 400 ms (an announced but broken service), an abort, and a missing announcement all leave the lists exactly as Pi built them, and a broken service is asked once per process. `filterMissingFiles: false` removes the step entirely.
+
+Either extension works alone: this one keeps Pi's unfiltered lists when nothing answers, and `file-list-filter` filters Pi's built-in compactor whether or not this extension is loaded. Branch summaries are not covered by either side, because Pi generates their lists after `session_before_tree` returns.
+
 ## Testing
 
 ```bash
 npm test          # typecheck, unit tests, wire test, smoke. Offline, no provider calls
-npm run test:e2e  # offline. Real Pi 1.3 against a local mock provider (needs `pi` on PATH)
+npm run test:e2e  # offline. Real Pi 1.3 against a local mock provider. Needs `pi` on PATH
+npm run test:e2e:filelists  # offline. Real Pi against a mock provider. Needs `pi` on PATH
+                            # and the file-list-filter extension (skipped when absent)
 npm run test:live # opt-in. Requires PI_DEEPSEEK_COMPACTION_LIVE=1 and a DeepSeek key
 ```
 
@@ -77,6 +97,7 @@ The default run is entirely offline. The wire test drives pi-ai's real `openai-c
 | `src/resolve.ts` | Model, thinking level, and output-cap resolution |
 | `src/summarize.ts` | The provider call and response validation |
 | `src/fileops.ts` | Cumulative file lists and Pi's block formatting |
+| `src/existing.ts` | Client of the `file-list-filter` service (drop missing paths) |
 | `src/capture.ts` | Per-session request fingerprints |
 | `src/status.ts` | Rolling statistics and status report text |
 | `scripts/pi-prefix-check.mjs` | `npm run test:e2e`: offline end-to-end prefix check through real Pi |

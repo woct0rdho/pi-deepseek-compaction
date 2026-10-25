@@ -11,6 +11,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RequestCaptureStore } from "./capture.ts";
 import { loadConfig } from "./config.ts";
+import { ExistingPathsClient } from "./existing.ts";
 import {
   collectPreviousFileOps,
   computeFileLists,
@@ -67,6 +68,9 @@ function safeNotify(ctx: ExtensionContext, text: string, level: "info" | "warnin
 
 export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCompactionOptions = {}): void {
   const captures = new RequestCaptureStore();
+  const fileFilter = new ExistingPathsClient();
+  // Subscribe before the first compaction so a filter loaded earlier is heard.
+  fileFilter.watch(pi.events);
   const failures = new Map<string, FailureRecord>();
   const reportedProblems = new Set<string>();
 
@@ -196,8 +200,14 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         extractFileOpsFromMessages(slice.summarized, ops);
       }
       const lists = computeFileLists(ops);
+      // Paths are recorded from tool-call arguments, so files that were deleted
+      // or moved since are still listed. A loaded file-list filter answers which
+      // paths exist; without one the lists stay exactly as Pi builds them.
+      const filtered = config.fileLists && config.filterMissingFiles
+        ? await fileFilter.filter(pi.events, ctx.cwd, lists, { signal: event.signal })
+        : { lists, dropped: [] as string[] };
       const summary = config.fileLists
-        ? outcome.summary + formatFileOperations(lists)
+        ? outcome.summary + formatFileOperations(filtered.lists)
         : outcome.summary;
 
       const usage = outcome.usage;
@@ -205,8 +215,8 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         ? undefined
         : usage.input + usage.cacheRead + usage.cacheWrite;
       const details: ExtensionCompactionDetails = {
-        readFiles: lists.readFiles,
-        modifiedFiles: lists.modifiedFiles,
+        readFiles: filtered.lists.readFiles,
+        modifiedFiles: filtered.lists.modifiedFiles,
         dshCompaction: {
           version: 1,
           instructionVersion: INSTRUCTION_VERSION,
@@ -232,6 +242,7 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
           reason: event.reason,
           customInstructionsUsed:
             event.customInstructions !== undefined && event.customInstructions.trim().length > 0,
+          ...(filtered.dropped.length === 0 ? {} : { droppedFiles: filtered.dropped }),
         },
       };
 
@@ -308,6 +319,7 @@ export default function piDeepseekCompaction(pi: ExtensionAPI, options: PrefixCo
         sameModel,
         capture,
         stats: collectRollingStats(ctx.sessionManager.getEntries()),
+        fileFilter: fileFilter.status,
         lastFailure: failures.get(id),
         problems,
       });

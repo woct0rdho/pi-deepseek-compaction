@@ -93,6 +93,7 @@ describe("buildStatusReport", () => {
       stats: collectRollingStats([
         compactionEntry("c1", { dshCompaction: details({ cacheRead: 4_500, prefixTokens: 5_000 }) }),
       ]),
+      fileFilter: { unavailable: false },
       lastFailure: undefined,
       problems: [],
     });
@@ -104,6 +105,7 @@ describe("buildStatusReport", () => {
     assert.match(report, /Last: {4}cacheRead 4500 \/ prefixTokens 5000 = 0.90/);
     assert.match(report, /prefix fidelity 12\/12 messages/);
     assert.match(report, /Rolling: cacheRead 4500 \/ prefixTokens 5000 = 0.90/);
+    assert.match(report, /File lists: filter extension available, no check yet/);
     assert.match(report, /Last failure: none/);
   });
 
@@ -116,6 +118,7 @@ describe("buildStatusReport", () => {
       sameModel: false,
       capture: undefined,
       stats: collectRollingStats([]),
+      fileFilter: { unavailable: false },
       lastFailure: { at: Date.UTC(2026, 0, 2), reason: "compaction cancelled: prefix build failed" },
       problems: ["no credentials"],
     });
@@ -126,5 +129,37 @@ describe("buildStatusReport", () => {
     assert.match(report, /Configuration problems:/);
     assert.match(report, /- config: invalid value/);
     assert.match(report, /- no credentials/);
+  });
+
+  it("reports the last file-list check, an unanswered filter, and disabled filtering", () => {
+    const base = {
+      resolution,
+      piSettings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
+      sessionModelKey: "deepseek/deepseek-flash",
+      summarizeModelKey: "deepseek/deepseek-flash",
+      sameModel: true,
+      capture: undefined,
+      stats: collectRollingStats([]),
+      lastFailure: undefined,
+      problems: [],
+    };
+    const checked = buildStatusReport({
+      ...base,
+      fileFilter: { unavailable: false, last: { at: Date.now() - 1_500, checked: 24, dropped: 3 } },
+    });
+    assert.match(checked, /File lists: last check dropped 3 of 24 paths \(1\.5 s ago\)/);
+
+    const absent = buildStatusReport({ ...base, fileFilter: { unavailable: true } });
+    assert.match(absent, /File lists: no filter extension answered/);
+
+    const disabled = buildStatusReport({
+      ...base,
+      resolution: {
+        ...resolution,
+        config: { ...resolution.config, filterMissingFiles: false },
+      },
+      fileFilter: { unavailable: false, last: { at: Date.now(), checked: 4, dropped: 0 } },
+    });
+    assert.match(disabled, /File lists: filtering disabled \(filterMissingFiles=false\)/);
   });
 });

@@ -20,7 +20,8 @@
     "test:wire": "node --test tests/wire/*.test.ts",
     "smoke": "node scripts/smoke.mjs",
     "test:live": "node tests/live/deepseek-cache.ts",
-    "test:e2e": "node scripts/pi-prefix-check.mjs"
+    "test:e2e": "node scripts/pi-prefix-check.mjs",
+    "test:e2e:filelists": "node scripts/pi-file-list-e2e.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": ">=1.3.0",
